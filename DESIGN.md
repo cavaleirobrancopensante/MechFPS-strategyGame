@@ -28,7 +28,7 @@ the swarm.
 - No 3D models, no image files: all sprites and sounds are generated
   in code, so the project stays tiny and easy to edit on a phone.
 
-## Look (3.4)
+## Look
 Still the 2.5D column renderer, but drawn to look as real as it can:
 - **Textured surfaces**, generated at start-up (`scripts/battle/surfaces.gd`):
   concrete with slab joints and rain streaks, brick, rusty corrugated
@@ -248,10 +248,12 @@ flow field (pathfinding toward the player).
 - **Phone:** left thumb anywhere on the left side = walking joystick;
   drag on the right side to turn and look up/down; hold FIRE (sliding on
   it also aims); tap RKT for rockets; EXIT MECH / CLIMB IN under the minimap.
-  On foot the RKT button becomes JUMP.
+  On foot the RKT button becomes JUMP, and AIM (above FIRE) raises the
+  carbine to your eye.
 - **Keyboard (testing):** WASD walk/strafe, arrows or Q/E turn,
   T/G or PageUp/PageDown look up/down, Space fire, R or F rockets,
-  X exit/board, Shift run on foot, J jump, C context action.
+  X exit/board, Shift run on foot, J jump, C context action, right mouse
+  button (hold) to aim down the sight.
 
 ## The Rock's screen
 See [docs/UI_STUDY.md](docs/UI_STUDY.md) for the study behind it. Resource
@@ -263,17 +265,29 @@ coloured by type, briefing on the right, LAUNCH always visible),
 hints like "3 idle" or "! repair".
 
 ## Roadmap
-- **3.4:** graphics overhaul for a realistic look (textures, sun lighting, haze, clouds, better models and effects, film pass).
-- **3.3:** jump on foot (and the pilot now climbs any step Brigid can); the harvest team; stack up to 6 biomass jars; the carbine's left hand grips the barrel.
-- **3.2:** alien bodies stay; the Chest (cargo walker) that everything must be carried to; hazmat suit and biomass harvesting; survivors follow you to the Chest.
-- **3.1:** two new aliens: the Flyer and the Burrower.
-- **3.0:** main menu (Survival, Continue, New Game, Load Game with 3 slots,
+Version numbers were reset in October 2026: the game is now **1.4** and
+from here on only the number after the point goes up (1.5, 1.6, ...).
+Entries below 1.4 marked "old" use the earlier numbering.
+- **1.4:** people and guns rebuilt as real 3D models (Godot's own renderer
+  photographs them into sprites, `scripts/baker.gd`, cached on the phone):
+  survivors in three outfits with waving and walking animations, the
+  hazmat harvest crew walking, carrying and kneeling to cut; the pilot's
+  carbine with hands and a red-dot sight; Brigid's armoured rotary
+  autocannon arms. Aim down the sight on foot: right mouse button, or the
+  AIM button on the phone (zoom, steadier aim, slower walk, red dot).
+  Fighter-style gunsight in the cockpit: heading tape, pitch ladder,
+  reticle with laser range, target name and health.
+- **old 3.4:** graphics overhaul for a realistic look (textures, sun lighting, haze, clouds, better models and effects, film pass).
+- **old 3.3:** jump on foot (and the pilot now climbs any step Brigid can); the harvest team; stack up to 6 biomass jars; the carbine's left hand grips the barrel.
+- **old 3.2:** alien bodies stay; the Chest (cargo walker) that everything must be carried to; hazmat suit and biomass harvesting; survivors follow you to the Chest.
+- **old 3.1:** two new aliens: the Flyer and the Burrower.
+- **old 3.0:** main menu (Survival, Continue, New Game, Load Game with 3 slots,
   Settings, Quit), pause menu in battle, endless Survival mode with infinite
   ammo, redesigned base screen, seven zone themes with weather, map layouts
   and scenery (trees, wrecked cars, explosive barrels).
-- **2.1:** solid-looking sprites: 3D-modelled, 8-direction views, walk
+- **old 2.1:** solid-looking sprites: 3D-modelled, 8-direction views, walk
   cycles, ground shadows.
-- **2.0:** story campaign (12 missions, 3 acts, cast of 6), the Rock as a
+- **old 2.0:** story campaign (12 missions, 3 acts, cast of 6), the Rock as a
   base with modules, people as crew, resources instead of money, limited
   ammunition and an ammo factory, air drops and dropship extraction,
   six mission types including wave survival, destructible terrain.
