@@ -13,4 +13,4 @@ audio files, and even the 20-song soundtrack is composed in code.
 - See [STORY.md](STORY.md) for the world and characters, and
   [DESIGN.md](DESIGN.md) for the game design, controls and roadmap.
 
-Version: **3.2**
+Version: **3.3**

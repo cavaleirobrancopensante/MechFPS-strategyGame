@@ -33,6 +33,9 @@ static func build_all() -> Dictionary:
 	out["burrower_dead"] = _view_set(2.0, 96, 1, func(ph): return _dead(_burrower(0.25), PI))
 	out["hive_dead"] = _view_set(2.2, 96, 1, func(ph): return _slump(_hive(0.0, 1.0, Color(0.42, 0.14, 0.32))))
 	out["mother_dead"] = _view_set(3.9, 128, 1, func(ph): return _slump(_hive(0.0, 1.75, Color(0.5, 0.12, 0.2))))
+	out["hazmat_walk"] = _view_set(0.95, 48, 2, func(ph): return _hazmat_worker(ph, 0))
+	out["hazmat_carry"] = _view_set(0.95, 48, 2, func(ph): return _hazmat_worker(ph, 1))
+	out["hazmat_cut"] = _view_set(0.95, 48, 2, func(ph): return _hazmat_worker(ph, 2))
 	out["chest"] = _view_set(2.2, 80, 4, func(ph): return _chest(ph, true))
 	out["chest_nosuit"] = _view_set(2.2, 80, 4, func(ph): return _chest(ph, false))
 	out["pile_scrap"] = _view_set(0.8, 40, 1, func(ph): return _scrap_pile())
@@ -527,6 +530,45 @@ static func _survivor(ph: float) -> Array:
 	var hand := Vector3(0.2, 0.88, 0.03) if ph < 0.5 else Vector3(0.26, 0.8, 0.05)
 	parts.append(_seg(Vector3(0.11, 0.65, 0), hand, 0.028, coat))
 	parts.append(_ball(hand, 0.03, skin))
+	return parts
+
+
+static func _hazmat_worker(ph: float, mode: int) -> Array:
+	## A harvest-team volunteer in a yellow hazmat suit. mode 0 walking,
+	## 1 carrying a biomass jar, 2 kneeling and cutting.
+	var suit := Color(0.95, 0.82, 0.15)
+	var dark := Color(0.3, 0.28, 0.2)
+	var visor := Color(0.15, 0.3, 0.35)
+	var sw := sin(ph * TAU)
+	var parts: Array = []
+	if mode == 2:
+		# Kneeling over a carcass, knife hand sawing.
+		parts.append(_seg(Vector3(-0.06, 0.3, 0), Vector3(-0.07, 0.03, 0.18), 0.04, suit))
+		parts.append(_seg(Vector3(0.06, 0.3, 0), Vector3(0.07, 0.08, -0.15), 0.04, suit))
+		parts.append(_ell(Vector3(0, 0.42, 0.04), Vector3(0.12, 0.15, 0.09), suit, Vector3(0.5, 0, 0), 0.3))
+		parts.append(_ell(Vector3(0, 0.6, 0.12), Vector3(0.08, 0.08, 0.08), suit, Vector3.ZERO, 0.3))
+		parts.append(_ell(Vector3(0, 0.6, 0.18), Vector3(0.055, 0.04, 0.03), visor, Vector3.ZERO, 0.9))
+		var hand := Vector3(0.08, 0.2 + sw * 0.05, 0.32)
+		parts.append(_seg(Vector3(0.1, 0.5, 0.08), hand, 0.03, suit))
+		parts.append(_seg(hand, hand + Vector3(0, -0.06, 0.1), 0.012, Color(0.85, 0.88, 0.9), 0.8))
+		parts.append(_seg(Vector3(-0.1, 0.5, 0.08), Vector3(-0.08, 0.22, 0.3), 0.03, suit))
+		parts.append(_box(Vector3(-0.2, 0.06, 0.05), Vector3(0.05, 0.06, 0.05), Color(0.55, 1.0, 0.35), 0.0, 0.0, true))
+		return parts
+	for side in [-1.0, 1.0]:
+		var s: float = sw * side
+		parts.append(_seg(Vector3(side * 0.05, 0.42, 0), Vector3(side * 0.06, 0.04, s * 0.1), 0.04, suit))
+		parts.append(_ell(Vector3(side * 0.06, 0.03, s * 0.1 + 0.03), Vector3(0.04, 0.03, 0.06), dark))
+	parts.append(_ell(Vector3(0, 0.58, 0), Vector3(0.12, 0.18, 0.09), suit, Vector3.ZERO, 0.3))
+	parts.append(_ell(Vector3(0, 0.82, 0), Vector3(0.085, 0.085, 0.085), suit, Vector3.ZERO, 0.3))
+	parts.append(_ell(Vector3(0, 0.82, 0.06), Vector3(0.06, 0.045, 0.03), visor, Vector3.ZERO, 0.9))
+	parts.append(_box(Vector3(0, 0.6, -0.11), Vector3(0.07, 0.1, 0.04), dark))
+	if mode == 1:
+		parts.append(_seg(Vector3(-0.11, 0.68, 0), Vector3(-0.05, 0.5, 0.14), 0.03, suit))
+		parts.append(_seg(Vector3(0.11, 0.68, 0), Vector3(0.05, 0.5, 0.14), 0.03, suit))
+		parts.append(_ell(Vector3(0, 0.52, 0.17), Vector3(0.07, 0.09, 0.07), Color(0.55, 1.0, 0.35), Vector3.ZERO, 0.0, true))
+	else:
+		parts.append(_seg(Vector3(-0.11, 0.68, 0), Vector3(-0.13, 0.42, -sw * 0.08), 0.03, suit))
+		parts.append(_seg(Vector3(0.11, 0.68, 0), Vector3(0.13, 0.42, sw * 0.08), 0.03, suit))
 	return parts
 
 
