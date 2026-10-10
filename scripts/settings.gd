@@ -108,7 +108,7 @@ static func build_panel(on_close: Callable) -> PanelContainer:
 		s.apply())
 	v.add_child(hint)
 	var note := Label.new()
-	note.text = "Lower graphics draws fewer screen columns: faster on older phones."
+	note.text = "Low: fewer screen columns and no film effects (bloom, colour grade, grain). Medium: light bloom. High: full detail."
 	note.add_theme_font_size_override("font_size", 15)
 	note.add_theme_color_override("font_color", Color(0.65, 0.7, 0.7))
 	v.add_child(note)

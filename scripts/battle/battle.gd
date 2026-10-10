@@ -14,6 +14,9 @@ const Story = preload("res://scripts/story.gd")
 const ModelArt = preload("res://scripts/battle/model_art.gd")
 const Themes = preload("res://scripts/battle/themes.gd")
 const SettingsScript = preload("res://scripts/settings.gd")
+const Surfaces = preload("res://scripts/battle/surfaces.gd")
+const FOG_SHADER = preload("res://scripts/battle/world_fog.gdshader")
+const POST_SHADER = preload("res://scripts/battle/post.gdshader")
 
 # --- View ---------------------------------------------------------------------
 var COLUMNS := 200            ## rays per frame (from Settings: graphics quality)
@@ -41,6 +44,27 @@ var best_before := {}
 var new_best := false
 var paused := false
 var pause_layer: CanvasLayer
+
+# --- Rendering layers ------------------------------------------------------------
+## Drawing is split over four canvases so each gets the right treatment:
+## sky (behind everything), the world (walls, floor, roofs: fogged by a
+## shader), effects (sprites, particles, guns, cockpit), and the HUD on top
+## of the post-processing pass. `cv` is the canvas currently being drawn on.
+var cv: CanvasItem = self
+var sky_node: Node2D
+var fx_node: Node2D
+var ui_node: Node2D
+var post_rect: ColorRect
+var surf := {}
+var wall_tex := {}
+var ground_tex: Texture2D
+var sun_dir := Vector2(1, 0)  ## direction towards the sun (horizontal)
+var sun_el := 0.5
+var sun_col := Color(1, 1, 1)
+var ambient := Color(0.5, 0.5, 0.5)
+var face_light: Array = []   ## light on faces facing -x, +x, -y, +y
+var top_light := Color(1, 1, 1)
+var ao_bands: Array[Vector4] = []   ## contact shadows at wall bases: x, y0, y1, strength
 
 # --- Salvage, harvesting and the Chest -----------------------------------------
 ## Everything you bring home has to go into the Chest: Mags's cargo walker
@@ -297,10 +321,78 @@ func _ready() -> void:
 	_radio("drop")
 	Sfx.play("rocket", -4.0, 0.0, 0.6)
 	_build_pause_menu()
+	_build_layers()
+
+
+func _build_layers() -> void:
+	surf = Surfaces.get_all()
+	var fog_mat := ShaderMaterial.new()
+	fog_mat.shader = FOG_SHADER
+	fog_mat.set_shader_parameter("fog_color", FOG)
+	material = fog_mat
+	texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	wall_tex = {
+		LevelMap.EMPTY: "earth", LevelMap.RUIN: String(zone_theme.get("ruin_tex", "concrete")),
+		LevelMap.METAL: "metal", LevelMap.ORGANIC: "flesh", LevelMap.PLATFORM: "plates", LevelMap.RUBBLE: "rubble",
+	}
+	ground_tex = surf["g_" + String(zone_theme.get("ground_tex", "gravel"))]
+	sky_node = Node2D.new()
+	sky_node.show_behind_parent = true
+	sky_node.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+	sky_node.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+	sky_node.draw.connect(func():
+		cv = sky_node
+		_draw_sky(get_viewport_rect().size.x, get_viewport_rect().size.y, horizon_y)
+		cv = self)
+	add_child(sky_node)
+	fx_node = Node2D.new()
+	fx_node.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+	fx_node.draw.connect(_draw_fx)
+	add_child(fx_node)
+	var post_layer := CanvasLayer.new()
+	post_layer.layer = 1
+	add_child(post_layer)
+	post_rect = ColorRect.new()
+	post_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	post_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var pm := ShaderMaterial.new()
+	pm.shader = POST_SHADER
+	pm.set_shader_parameter("grade", Vector3(zone_theme["grade"].r, zone_theme["grade"].g, zone_theme["grade"].b) if zone_theme.has("grade") else Vector3.ONE)
+	post_rect.material = pm
+	post_layer.add_child(post_rect)
+	var ui_layer := CanvasLayer.new()
+	ui_layer.layer = 2
+	add_child(ui_layer)
+	ui_node = Node2D.new()
+	ui_node.draw.connect(_draw_ui)
+	ui_layer.add_child(ui_node)
+	_apply_quality()
+
+
+func _apply_quality() -> void:
+	## Graphics setting: Low skips post-processing, Medium uses a light
+	## bloom, High the full one.
+	var q: int = Settings.quality
+	post_rect.visible = q > 0
+	(post_rect.material as ShaderMaterial).set_shader_parameter("taps", 4 if q == 1 else 8)
 
 
 func _apply_theme(t: Dictionary) -> void:
 	zone_theme = t
+	sun_dir = Vector2.from_angle(float(t.get("sun_az", 0.9)))
+	sun_el = float(t.get("sun_el", 0.4))
+	sun_col = t.get("sun_col", Color(1, 0.95, 0.85))
+	ambient = t.get("ambient", Color(0.5, 0.5, 0.55))
+	face_light = []
+	for nrm in [Vector2(-1, 0), Vector2(1, 0), Vector2(0, -1), Vector2(0, 1)]:
+		var k := maxf(0.0, nrm.dot(sun_dir)) * cos(sun_el)
+		face_light.append(ambient + sun_col * k)
+	top_light = ambient * 1.05 + sun_col * sin(sun_el) * 0.9
+	# Sprites: lit by the same sky and sun.
+	var sl := ambient * 0.85 + sun_col * (0.3 + 0.35 * sin(sun_el))
+	tint = t["tint"]
+	tint = Color(tint.r * sl.r, tint.g * sl.g, tint.b * sl.b)
 	FOG = t["fog"]
 	var walls: Dictionary = t["walls"]
 	FACE_COLORS = {
@@ -309,7 +401,6 @@ func _apply_theme(t: Dictionary) -> void:
 	}
 	GROUND_TOP = t["ground_top"]
 	PLATFORM_TOP = t["platform_top"]
-	tint = t["tint"]
 	weather = t["weather"]
 
 
@@ -493,7 +584,13 @@ func _process(delta: float) -> void:
 		corpses = corpses.slice(corpses.size() - 140)
 	hands_msg_cd -= delta
 	_update_effects(delta)
+	position = Vector2(rng.randf_range(-1, 1), rng.randf_range(-1, 1)) * shake
+	if sky_node:
+		sky_node.queue_redraw()
 	queue_redraw()
+	if fx_node:
+		fx_node.queue_redraw()
+		ui_node.queue_redraw()
 
 
 func _update_player(delta: float) -> void:
@@ -2492,6 +2589,7 @@ func _confirm_quit(to_menu: bool) -> void:
 
 
 func _apply_live_settings() -> void:
+	_apply_quality()
 	LOOK_SENS = 0.0065 * Settings.look_sensitivity
 	PITCH_SENS = 0.9 * Settings.look_sensitivity
 	var cols := Settings.columns()
@@ -2511,17 +2609,28 @@ func _mech_button_rect(s: Vector2) -> Rect2:
 # =============================================================================
 
 func _draw() -> void:
+	## World pass: floor, walls and roofs (fogged by world_fog.gdshader).
+	var s := get_viewport_rect().size
+	cv = self
+	var proj_scale := s.x * 0.5 / FOV_PLANE
+	_draw_ground(s.x, s.y, horizon_y)
+	_draw_world(s.x, s.y, horizon_y, proj_scale)
+
+
+func _draw_fx() -> void:
+	## Everything in front of the world geometry: aliens, props, effects,
+	## weather, then your guns and the cockpit (or the pilot's hands).
 	var s := get_viewport_rect().size
 	var w := s.x
 	var h := s.y
-	var shake_off := Vector2(rng.randf_range(-1, 1), rng.randf_range(-1, 1)) * shake
-	draw_set_transform(shake_off)
-
+	cv = fx_node
 	var proj_scale := w * 0.5 / FOV_PLANE
 	var horizon := horizon_y
-	_draw_sky(w, h, horizon)
-	_draw_ground(w, h, horizon)
-	_draw_world(w, h, horizon, proj_scale)
+	var cw := w / COLUMNS + 1.0
+	for band in ao_bands:
+		var a0 := 0.5 * band.w
+		cv.draw_polygon(PackedVector2Array([Vector2(band.x, band.y), Vector2(band.x + cw, band.y), Vector2(band.x + cw, band.z), Vector2(band.x, band.z)]),
+			PackedColorArray([Color(0, 0, 0, a0), Color(0, 0, 0, a0), Color(0, 0, 0, 0), Color(0, 0, 0, 0)]))
 	_draw_sprites(w, h, horizon, proj_scale)
 	_draw_tracers(w, h, horizon, proj_scale)
 	_draw_weather(w, h)
@@ -2531,15 +2640,23 @@ func _draw() -> void:
 	elif climb_t <= 0.0:
 		_draw_pilot_gun(w, h)
 		_draw_visor(w, h)
-	_draw_hud(w, h, horizon, proj_scale)
+	cv = self
+
+
+func _draw_ui() -> void:
+	## HUD, above the post-processing pass so text stays crisp.
+	var s := get_viewport_rect().size
+	var w := s.x
+	var h := s.y
+	cv = ui_node
+	_draw_hud(w, h, horizon_y, w * 0.5 / FOV_PLANE)
 	if climb_t > 0.0:
 		_draw_climb_overlay(w, h)
-
-	draw_set_transform(Vector2.ZERO)
 	if state == State.PLAYING:
 		_draw_touch_controls(w, h)
 	else:
 		_draw_end_screen(w, h)
+	cv = self
 
 
 func _sky_x(rel: float, w: float) -> float:
@@ -2547,12 +2664,19 @@ func _sky_x(rel: float, w: float) -> float:
 
 
 func _draw_sky(w: float, h: float, horizon: float) -> void:
+	## Sky canvas: gradient, stars, sun or moon with its glow, the Lantern,
+	## two layers of cloud and the distant ridges fading into the haze.
 	var top: Color = zone_theme["sky_top"]
 	var hor: Color = zone_theme["sky_horizon"]
-	draw_rect(Rect2(-40, -40, w + 80, horizon - h * 0.55 + 41), top)
-	draw_polygon(
-		PackedVector2Array([Vector2(-40, horizon - h * 0.55), Vector2(w + 40, horizon - h * 0.55), Vector2(w + 40, horizon), Vector2(-40, horizon)]),
-		PackedColorArray([top, top, hor, hor]))
+	var mid := top.lerp(hor, 0.45)
+	var ps := w * 0.5 / FOV_PLANE
+	cv.draw_rect(Rect2(-40, -40, w + 80, horizon - h * 0.9 + 41), top)
+	cv.draw_polygon(
+		PackedVector2Array([Vector2(-40, horizon - h * 0.9), Vector2(w + 40, horizon - h * 0.9), Vector2(w + 40, horizon - h * 0.3), Vector2(-40, horizon - h * 0.3)]),
+		PackedColorArray([top, top, mid, mid]))
+	cv.draw_polygon(
+		PackedVector2Array([Vector2(-40, horizon - h * 0.3), Vector2(w + 40, horizon - h * 0.3), Vector2(w + 40, horizon + 4), Vector2(-40, horizon + 4)]),
+		PackedColorArray([mid, mid, hor, hor]))
 	var half_fov := atan(FOV_PLANE) + 0.05
 	var star_k: float = zone_theme["stars"]
 	if star_k > 0.0:
@@ -2562,10 +2686,30 @@ func _draw_sky(w: float, h: float, horizon: float) -> void:
 				continue
 			var y: float = horizon - st["e"] * h * 0.45
 			var b: float = st["b"] * (0.6 + 0.4 * sin(time * 2.0 + st["a"] * 9.0)) * star_k
-			draw_rect(Rect2(_sky_x(rel, w), y, 2, 2), Color(1, 0.95, 0.9, b * clampf((horizon - y) / (h * 0.45), 0.0, 1.0) * 1.3))
+			cv.draw_rect(Rect2(_sky_x(rel, w), y, 2, 2), Color(1, 0.95, 0.9, b * clampf((horizon - y) / (h * 0.45), 0.0, 1.0) * 1.3))
 
-	# Ringed gas giant (the Lantern) hanging over the battlefield, washed
-	# out by daylight or haze in brighter zones.
+	# Sun (or moon) and the glow it throws across the sky.
+	var srel := wrapf(sun_dir.angle() - angle, -PI, PI)
+	var glow: Texture2D = surf["glow"]
+	if absf(srel) < half_fov + 0.8:
+		var sp := Vector2(_sky_x(srel, w) if absf(srel) < 1.4 else (w * 2.0 * signf(srel)), horizon - tan(sun_el) * ps)
+		var gsz := w * 1.1
+		var gc := sun_col
+		gc.a = 0.35 if not zone_theme.get("night", false) else 0.12
+		cv.draw_texture_rect(glow, Rect2(sp - Vector2(gsz, gsz) * 0.5, Vector2(gsz, gsz)), false, gc)
+		if absf(srel) < half_fov + 0.05:
+			var disc := 22.0 if not zone_theme.get("night", false) else 16.0
+			var dc := sun_col.lightened(0.5)
+			dc.a = 0.9
+			cv.draw_texture_rect(glow, Rect2(sp - Vector2(disc, disc) * 3.0, Vector2(disc, disc) * 6.0), false, Color(dc.r, dc.g, dc.b, 0.5))
+			cv.draw_circle(sp, disc, dc)
+	# Horizon haze brightest towards the sun.
+	var haze := hor.lerp(sun_col, 0.25)
+	haze.a = 0.0
+	var haze2 := haze
+	haze2.a = 0.5
+
+	# Ringed gas giant (the Lantern).
 	var prel := wrapf(0.9 - angle, -PI, PI)
 	if zone_theme["planet"] and absf(prel) < half_fov + 0.3:
 		var c := Vector2(_sky_x(prel, w), horizon - h * 0.31)
@@ -2575,32 +2719,93 @@ func _draw_sky(w: float, h: float, horizon: float) -> void:
 		for i in 49:
 			var t := float(i) / 48.0 * TAU
 			ring.append(c + Vector2(cos(t) * r * 1.9, sin(t) * r * 0.42).rotated(-0.25))
-		draw_polyline(PackedVector2Array(ring.slice(24, 49)), Color(0.9, 0.75, 0.6, 0.6 - wash * 0.6), 3.0)
-		draw_circle(c, r, Color(0.78, 0.5, 0.38).lerp(top, wash))
-		draw_circle(c + Vector2(14, 10), r * 0.86, Color(0.58, 0.32, 0.27).lerp(top, wash))
-		draw_circle(c + Vector2(26, 18), r * 0.7, Color(0.38, 0.18, 0.18).lerp(top, wash))
-		draw_polyline(PackedVector2Array(ring.slice(0, 25)), Color(0.95, 0.82, 0.65, 0.8 - wash * 0.8), 3.0)
+		cv.draw_polyline(PackedVector2Array(ring.slice(24, 49)), Color(0.9, 0.75, 0.6, 0.6 - wash * 0.6), 3.0)
+		cv.draw_circle(c, r, Color(0.78, 0.5, 0.38).lerp(top, wash))
+		cv.draw_circle(c + Vector2(14, 10), r * 0.86, Color(0.58, 0.32, 0.27).lerp(top, wash))
+		cv.draw_circle(c + Vector2(26, 18), r * 0.7, Color(0.38, 0.18, 0.18).lerp(top, wash))
+		cv.draw_polyline(PackedVector2Array(ring.slice(0, 25)), Color(0.95, 0.82, 0.65, 0.8 - wash * 0.8), 3.0)
 
-	# Distant ridges (two layers).
+	# Clouds: a 360-degree panorama in two layers.
+	var clouds: Texture2D = surf["clouds"]
+	var cc: Color = zone_theme.get("cloud_col", hor.lerp(Color.WHITE, 0.35))
+	var span := 2.0 * atan(FOV_PLANE) / TAU
+	for layer in 2:
+		var reps := 2.0 if layer == 0 else 3.0
+		var src_w := 512.0 * reps * span
+		var off := angle / TAU * 512.0 * reps + (time * (3.0 if layer == 0 else 6.0)) + layer * 137.0
+		var band := Rect2(-40, horizon - h * (0.62 if layer == 0 else 0.36), w + 80, h * (0.42 if layer == 0 else 0.3))
+		var lc := cc if layer == 0 else cc.darkened(0.12).lerp(hor, 0.3)
+		lc.a = float(zone_theme.get("cloud_amount", 0.8)) * (0.85 if layer == 0 else 1.0)
+		cv.draw_texture_rect_region(clouds, band, Rect2(off - src_w * 0.5, 0, src_w, 128), lc)
+
+	# Distant ridges (two layers), softened by haze.
 	var strips := 80
 	var sw := w / strips
 	for layer in 2:
 		var ridge := ridge_far if layer == 0 else ridge_near
 		var col: Color = zone_theme["ridge_far"] if layer == 0 else zone_theme["ridge_near"]
+		col = col.lerp(hor, 0.35 if layer == 0 else 0.15)
 		for i in strips:
 			var xc := (i + 0.5) * sw
 			var rel := atan((2.0 * xc / w - 1.0) * FOV_PLANE)
 			var a := wrapf(angle + rel, 0.0, TAU)
 			var hgt: float = ridge[int(a / TAU * 256.0) % 256]
-			draw_rect(Rect2(i * sw, horizon - hgt, sw + 1.0, hgt + 1.0), col)
+			cv.draw_rect(Rect2(i * sw, horizon - hgt, sw + 1.0, hgt + 6.0), col)
+	cv.draw_polygon(
+		PackedVector2Array([Vector2(-40, horizon - 70), Vector2(w + 40, horizon - 70), Vector2(w + 40, horizon + 6), Vector2(-40, horizon + 6)]),
+		PackedColorArray([haze, haze, haze2, haze2]))
 
 
 func _draw_ground(w: float, h: float, horizon: float) -> void:
-	var gf: Color = zone_theme["ground_far"]
-	var gn: Color = zone_theme["ground_near"]
-	draw_polygon(
-		PackedVector2Array([Vector2(-40, horizon), Vector2(w + 40, horizon), Vector2(w + 40, h + 40), Vector2(-40, h + 40)]),
-		PackedColorArray([gf, gf, gn, gn]))
+	## The ground plane at height 0, textured and lit, cast in thin strips
+	## from the haze line down to your feet (each strip is one textured quad).
+	var ez := eye_z
+	if ez <= 0.05:
+		return
+	var ps := w * 0.5 / FOV_PLANE
+	var dir := Vector2.from_angle(angle)
+	var plane := Vector2(-dir.y, dir.x) * FOV_PLANE
+	var alb: Color = GROUND_TOP
+	var gcol := Color(alb.r * top_light.r, alb.g * top_light.g, alb.b * top_light.b, 1.0)
+	var y_fog := horizon + ez * ps / FOG_DIST
+	# Beyond the fog distance: pure haze.
+	cv.draw_rect(Rect2(-40, horizon - 1.0, w + 80, y_fog - horizon + 2.0), Color(0, 0, 0, 0))
+	var cam_l := 2.0 * (-40.0) / w - 1.0
+	var cam_r := 2.0 * (w + 40.0) / w - 1.0
+	var tile := 0.5   # texture repeats every 2 world units
+	var d0 := FOG_DIST
+	var y0 := y_fog
+	var pts := PackedVector2Array([Vector2(), Vector2(), Vector2(), Vector2()])
+	var cols := PackedColorArray([Color(), Color(), Color(), Color()])
+	var uvs := PackedVector2Array([Vector2(), Vector2(), Vector2(), Vector2()])
+	for i in 80:
+		if y0 > h + 40.0:
+			break
+		var d1 := d0 / 1.09
+		var y1 := horizon + ez * ps / d1
+		var l0 := (pos + (dir + plane * cam_l) * d0) * tile
+		var r0 := (pos + (dir + plane * cam_r) * d0) * tile
+		var l1 := (pos + (dir + plane * cam_l) * d1) * tile
+		var r1 := (pos + (dir + plane * cam_r) * d1) * tile
+		pts[0] = Vector2(-40, y0)
+		pts[1] = Vector2(w + 40, y0)
+		pts[2] = Vector2(w + 40, y1)
+		pts[3] = Vector2(-40, y1)
+		var c0 := gcol
+		c0.a = 1.0 - clampf(d0 / FOG_DIST, 0.0, 1.0)
+		var c1 := gcol
+		c1.a = 1.0 - clampf(d1 / FOG_DIST, 0.0, 1.0)
+		cols[0] = c0
+		cols[1] = c0
+		cols[2] = c1
+		cols[3] = c1
+		uvs[0] = l0
+		uvs[1] = r0
+		uvs[2] = r1
+		uvs[3] = l1
+		cv.draw_primitive(pts, cols, uvs, ground_tex)
+		d0 = d1
+		y0 = y1
 
 
 func _draw_weather(w: float, h: float) -> void:
@@ -2615,40 +2820,40 @@ func _draw_weather(w: float, h: float) -> void:
 				var sp := 900.0 + fposmod(i * 37.0, 400.0)
 				var x := fposmod(i * 97.13 - shift + time * 60.0, w + 40.0) - 20.0
 				var y := fposmod(i * 53.7 + time * sp, h + 60.0) - 30.0
-				draw_line(Vector2(x, y), Vector2(x - 4.0, y + 22.0), Color(0.7, 0.8, 1.0, 0.28), 1.5)
-			draw_rect(Rect2(0, 0, w, h), Color(0.3, 0.4, 0.6, 0.06))
+				cv.draw_line(Vector2(x, y), Vector2(x - 4.0, y + 22.0), Color(0.7, 0.8, 1.0, 0.28), 1.5)
+			cv.draw_rect(Rect2(0, 0, w, h), Color(0.3, 0.4, 0.6, 0.06))
 		"snow":
 			for i in 110:
 				var sp2 := 40.0 + fposmod(i * 13.0, 50.0)
 				var x2 := fposmod(i * 97.13 - shift + sin(time * 0.8 + i) * 24.0, w + 20.0) - 10.0
 				var y2 := fposmod(i * 61.3 + time * sp2, h + 20.0) - 10.0
-				draw_circle(Vector2(x2, y2), 1.5 + fposmod(i * 0.37, 2.0), Color(1, 1, 1, 0.75))
+				cv.draw_circle(Vector2(x2, y2), 1.5 + fposmod(i * 0.37, 2.0), Color(1, 1, 1, 0.75))
 		"dust":
 			for i in 50:
 				var x3 := fposmod(i * 131.7 - shift + time * (30.0 + i), w + 20.0) - 10.0
 				var y3 := fposmod(i * 71.3 + sin(time + i) * 10.0, h)
-				draw_circle(Vector2(x3, y3), 1.2, Color(1.0, 0.95, 0.8, 0.35))
-			draw_rect(Rect2(0, 0, w, h), Color(1.0, 0.92, 0.75, 0.05))
+				cv.draw_circle(Vector2(x3, y3), 1.2, Color(1.0, 0.95, 0.8, 0.35))
+			cv.draw_rect(Rect2(0, 0, w, h), Color(1.0, 0.92, 0.75, 0.05))
 		"ash":
 			for i in 90:
 				var x4 := fposmod(i * 97.13 - shift + time * 25.0 + sin(time + i) * 20.0, w + 20.0) - 10.0
 				var y4 := fposmod(i * 61.3 + time * (25.0 + fposmod(i * 7.0, 20.0)), h + 20.0) - 10.0
-				draw_rect(Rect2(x4, y4, 2.5, 2.0), Color(0.2, 0.2, 0.18, 0.55))
-			draw_rect(Rect2(0, 0, w, h), Color(0.55, 0.5, 0.3, 0.07))
+				cv.draw_rect(Rect2(x4, y4, 2.5, 2.0), Color(0.2, 0.2, 0.18, 0.55))
+			cv.draw_rect(Rect2(0, 0, w, h), Color(0.55, 0.5, 0.3, 0.07))
 		"spores":
 			for i in 60:
 				var x5 := fposmod(i * 113.1 - shift + sin(time * 0.5 + i) * 40.0, w + 20.0) - 10.0
 				var y5 := fposmod(i * 67.9 - time * (12.0 + fposmod(i * 3.0, 12.0)), h + 20.0) - 10.0
 				var pulse := 0.5 + 0.5 * sin(time * 3.0 + i)
-				draw_circle(Vector2(x5, y5), 2.5, Color(1.0, 0.5, 0.95, 0.25 + 0.35 * pulse))
+				cv.draw_circle(Vector2(x5, y5), 2.5, Color(1.0, 0.5, 0.95, 0.25 + 0.35 * pulse))
 		"fireflies":
 			for i in 34:
 				var x6 := fposmod(i * 151.3 - shift + sin(time * 0.6 + i * 1.7) * 60.0, w + 20.0) - 10.0
 				var y6 := h * 0.45 + fposmod(i * 37.1, h * 0.4) + sin(time * 0.9 + i) * 25.0
 				var blink := clampf(sin(time * 2.0 + i * 2.3) * 2.0, 0.0, 1.0)
 				if blink > 0.0:
-					draw_circle(Vector2(x6, y6), 5.0, Color(0.9, 1.0, 0.4, 0.15 * blink))
-					draw_circle(Vector2(x6, y6), 2.0, Color(1.0, 1.0, 0.6, 0.9 * blink))
+					cv.draw_circle(Vector2(x6, y6), 5.0, Color(0.9, 1.0, 0.4, 0.15 * blink))
+					cv.draw_circle(Vector2(x6, y6), 2.0, Color(1.0, 1.0, 0.6, 0.9 * blink))
 
 
 func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
@@ -2672,10 +2877,12 @@ func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	var px := pos.x
 	var py := pos.y
 	var cut := (hmax - ez) * ps
+	ao_bands.clear()
 	for c in COLUMNS:
 		var cam_x := 2.0 * (c + 0.5) / COLUMNS - 1.0
 		var rdx := dir.x + plane.x * cam_x
 		var rdy := dir.y + plane.y * cam_x
+		var cr := absf(plane.y * rdx - plane.x * rdy) * 2.0 / COLUMNS
 		var x := c * col_w
 		var cw := col_w + 1.0
 		var ev := PackedFloat32Array()
@@ -2688,6 +2895,8 @@ func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
 		var step_y := -1 if rdy < 0.0 else 1
 		var sdx := (px - mx) * ddx if rdx < 0.0 else (mx + 1.0 - px) * ddx
 		var sdy := (py - my) * ddy if rdy < 0.0 else (my + 1.0 - py) * ddy
+		var nidx_x := 0 if step_x > 0 else 1
+		var nidx_y := 2 if step_y > 0 else 3
 
 		var clip := h + 4.0
 		var ci := my * mw + mx
@@ -2709,7 +2918,10 @@ func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
 					if d_in > 0.05:
 						y_near = minf(horizon + (ez - cur_h) * ps / d_in, clip)
 					if y_near > y_far:
-						draw_rect(Rect2(x, y_far, cw, y_near - y_far), _top_color(cur_h, cur_k, d_out))
+						if d_out < 11.0:
+							_draw_top(x, cw, y_far, y_near, cur_h, cur_k, d_out, horizon, ps, rdx, rdy, plane * (1.0 / COLUMNS))
+						else:
+							cv.draw_rect(Rect2(x, y_far, cw, y_near - y_far), _top_color(cur_h, cur_k, d_out))
 				if y_far < clip:
 					clip = y_far
 					ev.append(d_out)
@@ -2737,7 +2949,16 @@ func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
 				if y_vis > y_top:
 					var wall_x := (py + d_in * rdy) if side == 0 else (px + d_in * rdx)
 					wall_x -= floorf(wall_x)
-					_draw_face(x, cw, y_top, y_vis, nh, cur_h, kinds[ci], side, wall_x, d_in, horizon, ps, ci)
+					# How much of the wall this column spans, so it shows the
+					# texture's full detail rather than one stretched texel.
+					var du := clampf(d_in * cr / maxf(absf(rdx if side == 0 else rdy), 0.05), 0.002, 1.0)
+					_draw_face(x, cw, y_top, y_vis, nh, cur_h, kinds[ci], side, wall_x, d_in, horizon, ps, ci, nidx_x if side == 0 else nidx_y, du)
+					# Contact shadow where the wall meets the ground.
+					var y_bot := horizon - (cur_h - ez) * ps / d_in
+					if y_bot < clip and d_in < 12.0 and d_in > 0.5:
+						var y_end := minf(horizon + (ez - cur_h) * ps / maxf(d_in - 0.5, 0.2), clip)
+						if y_end > y_bot + 1.0:
+							ao_bands.append(Vector4(x, y_bot, y_end, 1.0 - clampf(d_in / FOG_DIST, 0.0, 1.0)))
 				if y_top < clip:
 					clip = y_top
 					ev.append(d_in)
@@ -2747,18 +2968,51 @@ func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
 		col_events[c] = ev
 
 
-func _top_color(height: float, kind: int, d: float) -> Color:
-	var col: Color
+func _top_albedo(height: float, kind: int) -> Color:
 	match kind:
 		LevelMap.PLATFORM:
-			col = PLATFORM_TOP
+			return PLATFORM_TOP
 		LevelMap.RUBBLE:
-			col = FACE_COLORS[LevelMap.RUBBLE].darkened(0.15)
+			return FACE_COLORS[LevelMap.RUBBLE].darkened(0.1)
 		LevelMap.EMPTY:
-			col = GROUND_TOP.lightened(clampf(height * 0.12, 0.0, 0.3)) if height >= 0.0 else GROUND_TOP.darkened(0.35 * minf(-height, 1.0))
-		_:
-			col = FACE_COLORS.get(kind, FACE_COLORS[LevelMap.METAL]).darkened(0.35)
-	return col.lerp(FOG, clampf(d / FOG_DIST, 0.0, 1.0))
+			return GROUND_TOP.lightened(clampf(height * 0.06, 0.0, 0.2)) if height >= 0.0 else GROUND_TOP.darkened(0.3 * minf(-height, 1.0))
+	return FACE_COLORS.get(kind, FACE_COLORS[LevelMap.METAL]).darkened(0.25)
+
+
+func _top_color(height: float, kind: int, d: float) -> Color:
+	var c := _top_albedo(height, kind)
+	return Color(c.r * top_light.r, c.g * top_light.g, c.b * top_light.b, 1.0 - clampf(d / FOG_DIST, 0.0, 1.0))
+
+
+func _draw_top(x: float, cw: float, y_far: float, y_near: float, height: float, kind: int, d_far: float, horizon: float, ps: float, rdx: float, rdy: float, half_step := Vector2.ZERO) -> void:
+	## A roof, platform or terrace top: one textured quad per column.
+	var ez := eye_z
+	var dn := (ez - height) * ps / maxf(y_near - horizon, 0.01)
+	var tex: Texture2D = ground_tex
+	var tile := 0.5
+	match kind:
+		LevelMap.PLATFORM:
+			tex = surf["plates"]
+			tile = 1.0
+		LevelMap.RUBBLE:
+			tex = surf["rubble"]
+			tile = 1.0
+		LevelMap.RUIN, LevelMap.METAL:
+			tex = surf["g_slabs"]
+		LevelMap.ORGANIC:
+			tex = surf["flesh"]
+			tile = 1.0
+	var rd := Vector2(rdx, rdy)
+	var pfl := (pos + (rd - half_step) * d_far) * tile
+	var pfr := (pos + (rd + half_step) * d_far) * tile
+	var pnl := (pos + (rd - half_step) * dn) * tile
+	var pnr := (pos + (rd + half_step) * dn) * tile
+	var alb := _top_albedo(height, kind)
+	var cf := Color(alb.r * top_light.r, alb.g * top_light.g, alb.b * top_light.b, 1.0 - clampf(d_far / FOG_DIST, 0.0, 1.0))
+	var cn := cf
+	cn.a = 1.0 - clampf(dn / FOG_DIST, 0.0, 1.0)
+	cv.draw_primitive(PackedVector2Array([Vector2(x, y_far), Vector2(x + cw, y_far), Vector2(x + cw, y_near), Vector2(x, y_near)]),
+		PackedColorArray([cf, cf, cn, cn]), PackedVector2Array([pfl, pfr, pnr, pnl]), tex)
 
 
 func _vband(x: float, cw: float, y0: float, y1: float, lo: float, hi: float, c: Color) -> void:
@@ -2766,14 +3020,17 @@ func _vband(x: float, cw: float, y0: float, y1: float, lo: float, hi: float, c: 
 	var a := maxf(y0, lo)
 	var b := minf(y1, hi)
 	if b > a:
-		draw_rect(Rect2(x, a, cw, b - a), c)
+		cv.draw_rect(Rect2(x, a, cw, b - a), c)
 
 
-func _draw_face(x: float, cw: float, y_top: float, y_vis: float, top_h: float, base_h: float, kind: int, side: int, wall_x: float, d: float, horizon: float, proj_scale: float, cell := 0) -> void:
+func _draw_face(x: float, cw: float, y_top: float, y_vis: float, top_h: float, base_h: float, kind: int, side: int, wall_x: float, d: float, horizon: float, proj_scale: float, cell := 0, nidx := 0, du := 0.01) -> void:
+	## One column of a wall: textured, lit by the sun from its side, with
+	## grime at the base, then windows, hazard paint or glowing growth.
 	var fog := clampf(d / FOG_DIST, 0.0, 1.0)
-	var base: Color = FACE_COLORS.get(kind, FACE_COLORS[LevelMap.METAL])
-	if side == 1:
-		base = base.darkened(0.22)
+	var a := 1.0 - fog
+	var alb: Color = FACE_COLORS.get(kind, FACE_COLORS[LevelMap.METAL])
+	var li: Color = face_light[nidx]
+	var col := Color(alb.r * li.r, alb.g * li.g, alb.b * li.b, a)
 	var face_h := top_h - base_h
 	var yt := y_top
 	if kind == LevelMap.RUIN and face_h > 1.5:
@@ -2782,21 +3039,36 @@ func _draw_face(x: float, cw: float, y_top: float, y_vis: float, top_h: float, b
 		var jag := fposmod(sin(seg * 12.9898 + side * 3.1 + top_h * 7.0) * 43758.5453, 1.0)
 		yt += 0.25 * jag * proj_scale / d
 	elif kind == LevelMap.ORGANIC:
-		base = base.lightened(0.12 * sin(time * 3.0 + wall_x * 10.0))
-	var col := base.lerp(FOG, fog)
+		var pulse := 1.0 + 0.1 * sin(time * 3.0 + wall_x * 10.0)
+		col = Color(col.r * pulse, col.g * pulse, col.b * pulse, a)
 	var lo := maxf(yt, -50.0)
 	var hi := minf(y_vis, 5000.0)
 	if hi <= lo:
 		return
-	draw_rect(Rect2(x, lo, cw, hi - lo), col)
-
 	var k := proj_scale / d
-	var shade := Color(0, 0, 0, 0.35 * (1.0 - fog))
+	var tname: String = wall_tex[kind]
+	var tex: Texture2D = surf[tname]
+	var ts := float(Surfaces.TS)
+	var u := (wall_x + fposmod(float(cell) * 0.618, 1.0) * 3.0) * ts
+	var y_base := horizon - (base_h + 0.5 - eye_z) * k
+	var split := y_base if d < 10.0 else hi
+	if split > lo:
+		var ye := minf(hi, split)
+		var z0 := eye_z + (horizon - lo) / k
+		var z1 := eye_z + (horizon - ye) / k
+		cv.draw_texture_rect_region(tex, Rect2(x, lo, cw, ye - lo), Rect2(u, -z0 * ts, du * ts, (z0 - z1) * ts), col)
+	if split < hi:
+		var ys := maxf(lo, split)
+		var zb0 := eye_z + (horizon - ys) / k
+		var zb1 := eye_z + (horizon - hi) / k
+		var gt: Texture2D = surf[tname + "_base"]
+		cv.draw_texture_rect_region(gt, Rect2(x, ys, cw, hi - ys), Rect2(u, (base_h + 0.5 - zb0) * ts, du * ts, (zb0 - zb1) * ts), col)
+
 	match kind:
 		LevelMap.RUIN:
 			if face_h > 1.5:
-				var u := fposmod(wall_x * 2.0, 1.0)
-				if u > 0.25 and u < 0.62:
+				var uu := fposmod(wall_x * 2.0, 1.0)
+				if uu > 0.25 and uu < 0.62:
 					var z := base_h + 0.7
 					var win: Color = zone_theme["window"]
 					var lit_k: float = zone_theme["lit"]
@@ -2808,36 +3080,35 @@ func _draw_face(x: float, cw: float, y_top: float, y_vis: float, top_h: float, b
 						var hsh := fposmod(sin(float(cell * 7 + wcol * 13 + floor_i * 31 + side * 5) * 12.9898) * 43758.5453, 1.0)
 						if hsh < lit_k:
 							# Someone left a light on. Or someone's still in there.
-							var warm := Color(1.0, 0.78, 0.4).lerp(FOG, fog * 0.6)
-							warm.a = 0.95 - 0.1 * float(hsh < lit_k * 0.15) * (0.5 + 0.5 * sin(time * 9.0 + cell))
-							_vband(x, cw, wy0, wy1, lo, hi, warm)
+							var flick := 1.0 - 0.15 * float(hsh < lit_k * 0.15) * (0.5 + 0.5 * sin(time * 9.0 + cell))
+							_vband(x, cw, wy0, wy1, lo, hi, Color(1.3 * flick, 0.95 * flick, 0.5 * flick, 1.0 - fog * 0.5))
 						else:
-							_vband(x, cw, wy0, wy1, lo, hi, Color(win.r, win.g, win.b, 0.75 * (1.0 - fog)))
+							# Dark glass with a faint sky reflection at the top.
+							var wc := Color(win.r + li.r * 0.05, win.g + li.g * 0.05, win.b + li.b * 0.07, a)
+							_vband(x, cw, wy0, wy1, lo, hi, wc)
+							_vband(x, cw, wy0, wy0 + (wy1 - wy0) * 0.18, lo, hi, Color(wc.r + 0.08, wc.g + 0.09, wc.b + 0.12, a))
+						# Sill
+						_vband(x, cw, wy1, wy1 + maxf(1.0, 0.06 * k), lo, hi, Color(col.r * 1.15, col.g * 1.15, col.b * 1.15, a))
 						z += 1.3
 						floor_i += 1
-				if fposmod(wall_x * 4.0, 1.0) < 0.06:
-					draw_rect(Rect2(x, lo, cw, hi - lo), shade)
 			else:
 				# Low cover wall: lighter capstone along the top.
-				_vband(x, cw, y_top, y_top + 0.12 * k, lo, hi, base.lightened(0.25).lerp(FOG, fog))
+				_vband(x, cw, y_top, y_top + 0.1 * k, lo, hi, Color(col.r * 1.25, col.g * 1.25, col.b * 1.25, a))
 		LevelMap.METAL:
-			if fposmod(wall_x * 4.0, 1.0) < 0.07:
-				draw_rect(Rect2(x, lo, cw, hi - lo), shade)
 			var stripe := Color(0.75, 0.6, 0.1) if fposmod(wall_x * 6.0, 1.0) < 0.5 else Color(0.1, 0.1, 0.1)
 			var sy0 := horizon - (base_h + 0.35 - eye_z) * k
 			var sy1 := horizon - (base_h + 0.15 - eye_z) * k
-			_vband(x, cw, sy0, sy1, lo, hi, stripe.lerp(FOG, fog))
+			_vband(x, cw, sy0, sy1, lo, hi, Color(stripe.r * li.r, stripe.g * li.g, stripe.b * li.b, a))
 		LevelMap.ORGANIC:
 			var u2 := fposmod(wall_x * 3.0, 1.0)
 			if u2 > 0.42 and u2 < 0.55:
-				var glow := Color(1.0, 0.55, 0.15).lerp(FOG, fog * 0.7)
-				glow.a = 0.6 + 0.4 * sin(time * 4.0 + wall_x * 20.0)
+				var gl := 0.8 + 0.4 * sin(time * 4.0 + wall_x * 20.0)
 				var gz := base_h + face_h * 0.45
-				_vband(x, cw, horizon - (gz + 0.2 - eye_z) * k, horizon - (gz - eye_z) * k, lo, hi, glow)
+				_vband(x, cw, horizon - (gz + 0.2 - eye_z) * k, horizon - (gz - eye_z) * k, lo, hi, Color(1.4 * gl, 0.75 * gl, 0.2 * gl, 1.0 - fog * 0.4))
 		_:
-			# Steps, platform sides, terraces and crater walls: bright lip on top
-			# so every ledge reads clearly.
-			_vband(x, cw, y_top, y_top + maxf(2.0, 0.06 * k), lo, hi, base.lightened(0.35).lerp(FOG, fog))
+			# Steps, platform sides, terraces and crater walls: worn lip on
+			# top so every ledge reads clearly.
+			_vband(x, cw, y_top, y_top + maxf(2.0, 0.05 * k), lo, hi, Color(col.r * 1.35, col.g * 1.35, col.b * 1.35, a))
 
 
 func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> void:
@@ -2964,8 +3235,8 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				if not o["dead"] and (_is_nest(o) or o["kind"] == "brute") and o["hp"] < o["max"] and rect.size.x > 6.0:
 					var bar := Rect2(rect.position.x, rect.position.y - 10.0, rect.size.x, 5.0)
 					if bar.position.y < _clip_at(c, ty):
-						draw_rect(bar, Color(0, 0, 0, 0.6))
-						draw_rect(Rect2(bar.position, Vector2(bar.size.x * o["hp"] / o["max"], bar.size.y)), Color(0.9, 0.2, 0.6))
+						cv.draw_rect(bar, Color(0, 0, 0, 0.6))
+						cv.draw_rect(Rect2(bar.position, Vector2(bar.size.x * o["hp"] / o["max"], bar.size.y)), Color(0.9, 0.2, 0.6))
 				if o == locked_target and state == State.PLAYING:
 					_draw_brackets(rect, Color(1.0, 0.25, 0.2))
 			1:
@@ -2998,12 +3269,12 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					continue
 				if o["kind"] == "rocket":
 					var r := clampf(0.09 * proj_scale / ty, 2.0, 40.0)
-					draw_circle(Vector2(sx, cy), r * 2.2, Color(1.0, 0.5, 0.1, 0.35))
-					draw_circle(Vector2(sx, cy), r, Color(1.0, 0.95, 0.7))
+					cv.draw_circle(Vector2(sx, cy), r * 2.2, Color(1.0, 0.5, 0.1, 0.35))
+					cv.draw_circle(Vector2(sx, cy), r, Color(1.0, 0.95, 0.7))
 				else:
 					var r2 := clampf(0.14 * proj_scale / ty, 2.0, 60.0)
-					draw_circle(Vector2(sx, cy), r2 * 1.8, Color(0.5, 1.0, 0.1, 0.3))
-					draw_circle(Vector2(sx, cy), r2, Color(0.75, 1.0, 0.3))
+					cv.draw_circle(Vector2(sx, cy), r2 * 1.8, Color(0.5, 1.0, 0.1, 0.3))
+					cv.draw_circle(Vector2(sx, cy), r2, Color(0.75, 1.0, 0.3))
 			4:
 				_draw_shadow(o["pos"], o["z"], 0.3, horizon, proj_scale, fog, ty)
 				var ct: Texture2D = _view_frame("cache", o["face"], o["pos"], time * 3.0 + o["anim"])
@@ -3034,8 +3305,8 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					var br := _body_rect(sx, ty, 0.5, 0.7, o["z"], horizon, proj_scale)
 					if br.size.x > 4.0:
 						var pb := Rect2(br.position.x - 6, br.position.y - 10, br.size.x + 12, 5)
-						draw_rect(pb, Color(0, 0, 0, 0.6))
-						draw_rect(Rect2(pb.position, Vector2(pb.size.x * clampf(o["t"] / CREW_CUT_TIME, 0.0, 1.0), pb.size.y)), Color(0.5, 1.0, 0.3))
+						cv.draw_rect(pb, Color(0, 0, 0, 0.6))
+						cv.draw_rect(Rect2(pb.position, Vector2(pb.size.x * clampf(o["t"] / CREW_CUT_TIME, 0.0, 1.0), pb.size.y)), Color(0.5, 1.0, 0.3))
 			11:
 				# A carcass. Harvested ones are hollowed out and grey.
 				var ck: String = o["kind"] + "_dead"
@@ -3084,8 +3355,8 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var brect := _body_rect(sx, ty, 0.7, 2.6, o["z"], horizon, proj_scale)
 				if not o["done"] and o["prog"] > 0.0 and brect.size.x > 4.0:
 					var pbar := Rect2(brect.position.x - 10, brect.position.y - 12, brect.size.x + 20, 6)
-					draw_rect(pbar, Color(0, 0, 0, 0.6))
-					draw_rect(Rect2(pbar.position, Vector2(pbar.size.x * o["prog"] / BEACON_TIME, pbar.size.y)), Color(0.3, 0.9, 1.0))
+					cv.draw_rect(pbar, Color(0, 0, 0, 0.6))
+					cv.draw_rect(Rect2(pbar.position, Vector2(pbar.size.x * o["prog"] / BEACON_TIME, pbar.size.y)), Color(0.3, 0.9, 1.0))
 			9:
 				# The Gannet coming down onto the landing zone.
 				var k9 := clampf(pickup_t / PICKUP_TIME, 0.0, 1.0)
@@ -3100,9 +3371,9 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var pulse := 0.6 + 0.4 * sin(time * 6.0)
 				var c10 := clampi(int(sx / col_w), 0, COLUMNS - 1)
 				var clip10 := _clip_at(c10, ty)
-				draw_rect(Rect2(sx - bw * 0.5, -40.0, bw, minf(gy, clip10) + 40.0), Color(0.4, 1.0, 0.5, 0.18 * pulse))
+				cv.draw_rect(Rect2(sx - bw * 0.5, -40.0, bw, minf(gy, clip10) + 40.0), Color(0.4, 1.0, 0.5, 0.18 * pulse))
 				if gy < clip10:
-					draw_circle(Vector2(sx, gy), bw * 1.4, Color(0.5, 1.0, 0.6, 0.6 * pulse))
+					cv.draw_circle(Vector2(sx, gy), bw * 1.4, Color(0.5, 1.0, 0.6, 0.6 * pulse))
 			5:
 				_draw_shadow(mech_pos, mech_fz, 0.6, horizon, proj_scale, fog, ty)
 				var mt: Texture2D = _view_frame("mech", mech_angle, mech_pos, 0.0)
@@ -3121,13 +3392,21 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var base_r: float = minf(o["size"] * proj_scale / ty, h * 0.28)
 				var ec: Color = o["col"]
 				if o.get("smoke", false):
-					draw_circle(Vector2(sx, cy2 - k2 * base_r), base_r * (0.6 + k2 * 1.6), Color(ec.r, ec.g, ec.b, 0.35 * (1.0 - k2)))
+					var sr := base_r * (0.7 + k2 * 1.8)
+					var scol := Color(ec.r * tint.r, ec.g * tint.g, ec.b * tint.b, 0.55 * (1.0 - k2)).lerp(Color(FOG.r, FOG.g, FOG.b, 0.55 * (1.0 - k2)), fog * 0.7)
+					cv.draw_texture_rect(surf["puff"], Rect2(Vector2(sx, cy2 - k2 * base_r) - Vector2(sr, sr), Vector2(sr, sr) * 2.0), false, scol)
 				else:
-					var rr := base_r * (0.35 + 0.75 * k2)
-					draw_circle(Vector2(sx, cy2), rr, Color(ec.r, ec.g * 0.6, ec.b * 0.5, 0.55 * (1.0 - k2)))
-					draw_circle(Vector2(sx, cy2), rr * 0.7, Color(ec.r, ec.g, ec.b, 0.9 * (1.0 - k2)))
-					if k2 < 0.35:
-						draw_circle(Vector2(sx, cy2), rr * 0.4, Color(1, 1, 0.9, 1.0 - k2 * 2.5))
+					var rr := base_r * (0.45 + 0.85 * k2)
+					var gl := Color(ec.r, ec.g * 0.7, ec.b * 0.5, 0.35 * (1.0 - k2))
+					cv.draw_texture_rect(surf["glow"], Rect2(Vector2(sx, cy2) - Vector2(rr, rr) * 2.2, Vector2(rr, rr) * 4.4), false, gl)
+					var fc := Color(1.0, 1.0, 1.0, clampf(1.4 - k2 * 1.5, 0.0, 1.0))
+					if ec.g > ec.r:
+						fc = Color(ec.r * 1.4, ec.g * 1.4, ec.b * 1.4, fc.a)    # green alien splash
+					cv.draw_texture_rect(surf["fire"], Rect2(Vector2(sx, cy2) - Vector2(rr, rr), Vector2(rr, rr) * 2.0), false, fc)
+					if k2 > 0.35:
+						# Smoke rising off the fireball as it burns out.
+						var sm := Color(0.25, 0.23, 0.22, 0.5 * (k2 - 0.35))
+						cv.draw_texture_rect(surf["puff"], Rect2(Vector2(sx, cy2 - rr * k2) - Vector2(rr, rr) * 1.1, Vector2(rr, rr) * 2.2), false, sm)
 
 
 func _view_frame(kind: String, face: float, at: Vector2, frame_pos: float) -> Texture2D:
@@ -3156,7 +3435,7 @@ func _draw_shadow(at: Vector2, z: float, radius: float, horizon: float, ps: floa
 		if pr.y < 0.3:
 			return
 		pts.append(Vector2(pr.x, horizon + (eye_z - z) * ps / pr.y))
-	draw_colored_polygon(pts, Color(0, 0, 0, 0.4 * (1.0 - fog)))
+	cv.draw_colored_polygon(pts, Color(0, 0, 0, 0.4 * (1.0 - fog)))
 
 
 func _body_rect(sx: float, ty: float, w: float, h: float, z: float, horizon: float, ps: float) -> Rect2:
@@ -3196,7 +3475,7 @@ func _billboard(t: Texture2D, sx: float, ty: float, ww: float, hh: float, z: flo
 		var u0 := (xa - left) / sw
 		var u1 := (xb - left) / sw
 		var v1 := (vis_bottom - top) / sh
-		draw_texture_rect_region(t, Rect2(xa, top, xb - xa + 0.5, vis_bottom - top), Rect2(u0 * tw, 0, (u1 - u0) * tw, v1 * th), mod)
+		cv.draw_texture_rect_region(t, Rect2(xa, top, xb - xa + 0.5, vis_bottom - top), Rect2(u0 * tw, 0, (u1 - u0) * tw, v1 * th), mod)
 	return Rect2(left, top, sw, sh)
 
 
@@ -3206,8 +3485,8 @@ func _draw_brackets(r: Rect2, c: Color) -> void:
 	for corner in [g.position, Vector2(g.end.x, g.position.y), g.end, Vector2(g.position.x, g.end.y)]:
 		var sxn := 1.0 if corner.x == g.position.x else -1.0
 		var syn := 1.0 if corner.y == g.position.y else -1.0
-		draw_line(corner, corner + Vector2(l * sxn, 0), c, 2.0)
-		draw_line(corner, corner + Vector2(0, l * syn), c, 2.0)
+		cv.draw_line(corner, corner + Vector2(l * sxn, 0), c, 2.0)
+		cv.draw_line(corner, corner + Vector2(0, l * syn), c, 2.0)
 
 
 func _carbine_geom(w: float, h: float) -> Array:
@@ -3230,48 +3509,48 @@ func _draw_carried(w: float, h: float) -> void:
 	var c := Vector2(w * 0.5, h * 0.9) + sway
 	var gl := _glove_col()
 	var sleeve := Color(0.85, 0.72, 0.12) if hazmat else Color(0.22, 0.25, 0.2)
-	draw_colored_polygon(PackedVector2Array([Vector2(w * 0.12, h + 30), Vector2(w * 0.24, h + 30), c + Vector2(-110, 20), c + Vector2(-150, 0)]), sleeve)
-	draw_colored_polygon(PackedVector2Array([Vector2(w * 0.88, h + 30), Vector2(w * 0.76, h + 30), c + Vector2(110, 20), c + Vector2(150, 0)]), sleeve)
+	cv.draw_colored_polygon(PackedVector2Array([Vector2(w * 0.12, h + 30), Vector2(w * 0.24, h + 30), c + Vector2(-110, 20), c + Vector2(-150, 0)]), sleeve)
+	cv.draw_colored_polygon(PackedVector2Array([Vector2(w * 0.88, h + 30), Vector2(w * 0.76, h + 30), c + Vector2(110, 20), c + Vector2(150, 0)]), sleeve)
 	match carrying["kind"]:
 		"scrap":
 			var cols := [Color(0.55, 0.55, 0.58), Color(0.45, 0.3, 0.2), Color(0.35, 0.37, 0.4), Color(0.6, 0.5, 0.3)]
 			for k in 11:
 				var o := Vector2(sin(k * 2.3) * 110.0, -50.0 - cos(k * 1.7) * 45.0 - k * 7.0)
-				draw_set_transform(c + o, sin(k * 1.3) * 0.7, Vector2.ONE)
-				draw_rect(Rect2(-65, -15, 130, 30), cols[k % 4])
-				draw_rect(Rect2(-65, -15, 130, 30), Color(0, 0, 0, 0.5), false, 3.0)
-				draw_line(Vector2(-50, -4), Vector2(40, -4), Color(1, 1, 1, 0.25), 2.0)
-				draw_set_transform(Vector2.ZERO)
+				cv.draw_set_transform(c + o, sin(k * 1.3) * 0.7, Vector2.ONE)
+				cv.draw_rect(Rect2(-65, -15, 130, 30), cols[k % 4])
+				cv.draw_rect(Rect2(-65, -15, 130, 30), Color(0, 0, 0, 0.5), false, 3.0)
+				cv.draw_line(Vector2(-50, -4), Vector2(40, -4), Color(1, 1, 1, 0.25), 2.0)
+				cv.draw_set_transform(Vector2.ZERO)
 		"circuits":
 			for k in 3:
 				var r2 := Rect2(c + Vector2(-110, -50 - k * 22), Vector2(220, 18))
-				draw_rect(r2, Color(0.1, 0.45, 0.2))
+				cv.draw_rect(r2, Color(0.1, 0.45, 0.2))
 				for j in 6:
-					draw_rect(Rect2(r2.position + Vector2(14 + j * 34, 4), Vector2(16, 8)), Color(0.12, 0.12, 0.12) if j % 2 == 0 else Color(0.9, 0.75, 0.3))
+					cv.draw_rect(Rect2(r2.position + Vector2(14 + j * 34, 4), Vector2(16, 8)), Color(0.12, 0.12, 0.12) if j % 2 == 0 else Color(0.9, 0.75, 0.3))
 		"biomass":
 			# A stack of jars in a carry crate, up to MAX_JARS.
 			var glow := 0.75 + 0.25 * sin(time * 4.0)
 			var jars := int(carrying.get("jars", 1))
-			draw_circle(c + Vector2(0, -70), 110.0, Color(0.5, 1.0, 0.3, 0.1 * glow))
+			cv.draw_circle(c + Vector2(0, -70), 110.0, Color(0.5, 1.0, 0.3, 0.1 * glow))
 			for j in jars:
 				var col_i := j % 3
 				var row_i := j / 3
 				var jc := c + Vector2((col_i - 1) * 78.0 + (row_i * 20.0), -60.0 - row_i * 92.0)
-				draw_rect(Rect2(jc + Vector2(-32, -45), Vector2(64, 80)), Color(0.45, 0.95, 0.3, 0.85 * glow))
-				draw_circle(jc + Vector2(-8, -fmod(time * 30.0 + j * 17.0, 60.0) + 20.0), 4.0, Color(0.8, 1.0, 0.6, 0.6))
-				draw_rect(Rect2(jc + Vector2(-36, -55), Vector2(72, 13)), Color(0.4, 0.42, 0.45))
-				draw_rect(Rect2(jc + Vector2(-36, 33), Vector2(72, 10)), Color(0.4, 0.42, 0.45))
-			draw_rect(Rect2(c + Vector2(-135, -2), Vector2(270, 26)), Color(0.3, 0.25, 0.18))
+				cv.draw_rect(Rect2(jc + Vector2(-32, -45), Vector2(64, 80)), Color(0.45, 0.95, 0.3, 0.85 * glow))
+				cv.draw_circle(jc + Vector2(-8, -fmod(time * 30.0 + j * 17.0, 60.0) + 20.0), 4.0, Color(0.8, 1.0, 0.6, 0.6))
+				cv.draw_rect(Rect2(jc + Vector2(-36, -55), Vector2(72, 13)), Color(0.4, 0.42, 0.45))
+				cv.draw_rect(Rect2(jc + Vector2(-36, 33), Vector2(72, 10)), Color(0.4, 0.42, 0.45))
+			cv.draw_rect(Rect2(c + Vector2(-135, -2), Vector2(270, 26)), Color(0.3, 0.25, 0.18))
 		_:
 			var col := Color(0.55, 0.45, 0.3)
 			match String(carrying["model"]):
 				"item_fuel": col = Color(0.85, 0.3, 0.15)
 				"item_data": col = Color(0.3, 0.6, 0.9)
-			draw_rect(Rect2(c + Vector2(-120, -130), Vector2(240, 130)), col)
-			draw_rect(Rect2(c + Vector2(-120, -130), Vector2(240, 130)), Color(0, 0, 0, 0.5), false, 3.0)
-			draw_rect(Rect2(c + Vector2(-120, -80), Vector2(240, 14)), col.darkened(0.3))
-	draw_circle(c + Vector2(-120, -20), 30.0, gl)
-	draw_circle(c + Vector2(120, -20), 30.0, gl)
+			cv.draw_rect(Rect2(c + Vector2(-120, -130), Vector2(240, 130)), col)
+			cv.draw_rect(Rect2(c + Vector2(-120, -130), Vector2(240, 130)), Color(0, 0, 0, 0.5), false, 3.0)
+			cv.draw_rect(Rect2(c + Vector2(-120, -80), Vector2(240, 14)), col.darkened(0.3))
+	cv.draw_circle(c + Vector2(-120, -20), 30.0, gl)
+	cv.draw_circle(c + Vector2(120, -20), 30.0, gl)
 
 
 func _draw_harvest(w: float, h: float) -> void:
@@ -3288,40 +3567,40 @@ func _draw_harvest(w: float, h: float) -> void:
 		pts.append(c + Vector2(cos(a) * w * 0.42, sin(a) * h * 0.36 + 60.0))
 	pts.append(Vector2(w * 0.92, h + 40))
 	pts.append(Vector2(w * 0.08, h + 40))
-	draw_colored_polygon(pts, flesh)
+	cv.draw_colored_polygon(pts, flesh)
 	for k in 7:
 		var a2 := PI * 1.1 + k * 0.12
-		draw_line(c + Vector2(cos(a2) * w * 0.35, sin(a2) * h * 0.3 + 60.0), c + Vector2(cos(a2) * w * 0.12, sin(a2) * h * 0.1 + 70.0), flesh.darkened(0.35), 4.0)
+		cv.draw_line(c + Vector2(cos(a2) * w * 0.35, sin(a2) * h * 0.3 + 60.0), c + Vector2(cos(a2) * w * 0.12, sin(a2) * h * 0.1 + 70.0), flesh.darkened(0.35), 4.0)
 	# The cut opens up and the glowing tissue shows.
 	var open := minf(1.0, t * 2.0)
-	draw_colored_polygon(PackedVector2Array([c + Vector2(-130, -10), c + Vector2(0, -10 - 50 * open), c + Vector2(130, -10), c + Vector2(0, -10 + 40 * open)]), Color(0.12, 0.2, 0.05))
-	draw_circle(c + Vector2(0, -12), 34.0 * open, Color(0.6, 1.0, 0.35, 0.85))
+	cv.draw_colored_polygon(PackedVector2Array([c + Vector2(-130, -10), c + Vector2(0, -10 - 50 * open), c + Vector2(130, -10), c + Vector2(0, -10 + 40 * open)]), Color(0.12, 0.2, 0.05))
+	cv.draw_circle(c + Vector2(0, -12), 34.0 * open, Color(0.6, 1.0, 0.35, 0.85))
 	# Left hand: forceps holding the cut open.
 	var lh := c + Vector2(-170 + sin(time * 5.0) * 6.0, -40)
-	draw_line(lh, c + Vector2(-40, -20 - 30 * open), Color(0.75, 0.78, 0.8), 5.0)
-	draw_line(lh + Vector2(0, 10), c + Vector2(-40, -5 + 25 * open), Color(0.75, 0.78, 0.8), 5.0)
-	draw_circle(lh, 34.0, _glove_col())
-	draw_colored_polygon(PackedVector2Array([lh + Vector2(-30, 10), lh + Vector2(10, 30), Vector2(w * 0.1, h + 40), Vector2(-40, h + 40)]), Color(0.85, 0.72, 0.12))
+	cv.draw_line(lh, c + Vector2(-40, -20 - 30 * open), Color(0.75, 0.78, 0.8), 5.0)
+	cv.draw_line(lh + Vector2(0, 10), c + Vector2(-40, -5 + 25 * open), Color(0.75, 0.78, 0.8), 5.0)
+	cv.draw_circle(lh, 34.0, _glove_col())
+	cv.draw_colored_polygon(PackedVector2Array([lh + Vector2(-30, 10), lh + Vector2(10, 30), Vector2(w * 0.1, h + 40), Vector2(-40, h + 40)]), Color(0.85, 0.72, 0.12))
 	# Right hand: scalpel sawing back and forth, then the jar.
 	var rh := c + Vector2(150 + sin(time * 14.0) * 30.0 * (1.0 - t), -50 + cos(time * 14.0) * 10.0)
 	if t < 0.75:
-		draw_line(rh, rh + Vector2(-90, 30), Color(0.85, 0.88, 0.9), 4.0)
-		draw_line(rh + Vector2(-70, 23), rh + Vector2(-100, 34), Color(1, 1, 1), 2.0)
+		cv.draw_line(rh, rh + Vector2(-90, 30), Color(0.85, 0.88, 0.9), 4.0)
+		cv.draw_line(rh + Vector2(-70, 23), rh + Vector2(-100, 34), Color(1, 1, 1), 2.0)
 	else:
 		var k3 := (t - 0.75) / 0.25
 		var jar := c + Vector2(80, -30 - k3 * 120.0)
-		draw_rect(Rect2(jar - Vector2(28, 40), Vector2(56, 64)), Color(0.5, 1.0, 0.3, 0.85))
-		draw_rect(Rect2(jar - Vector2(31, 48), Vector2(62, 10)), Color(0.4, 0.42, 0.45))
+		cv.draw_rect(Rect2(jar - Vector2(28, 40), Vector2(56, 64)), Color(0.5, 1.0, 0.3, 0.85))
+		cv.draw_rect(Rect2(jar - Vector2(31, 48), Vector2(62, 10)), Color(0.4, 0.42, 0.45))
 		rh = jar + Vector2(40, 0)
-	draw_circle(rh, 34.0, _glove_col())
-	draw_colored_polygon(PackedVector2Array([rh + Vector2(30, 10), rh + Vector2(-10, 30), Vector2(w * 0.9, h + 40), Vector2(w + 40, h + 40)]), Color(0.85, 0.72, 0.12))
+	cv.draw_circle(rh, 34.0, _glove_col())
+	cv.draw_colored_polygon(PackedVector2Array([rh + Vector2(30, 10), rh + Vector2(-10, 30), Vector2(w * 0.9, h + 40), Vector2(w + 40, h + 40)]), Color(0.85, 0.72, 0.12))
 	# Goo drips
 	for k in 5:
 		var gy := fmod(time * 90.0 + k * 41.0, 90.0)
-		draw_circle(c + Vector2(-60 + k * 30, -10 + gy), 4.0, Color(0.6, 1.0, 0.35, 0.7 * (1.0 - gy / 90.0)))
+		cv.draw_circle(c + Vector2(-60 + k * 30, -10 + gy), 4.0, Color(0.6, 1.0, 0.35, 0.7 * (1.0 - gy / 90.0)))
 	var bar := Rect2(w * 0.5 - 160, h * 0.33, 320, 16)
-	draw_rect(bar, Color(0, 0, 0, 0.6))
-	draw_rect(Rect2(bar.position, Vector2(bar.size.x * t, bar.size.y)), Color(0.5, 1.0, 0.3))
+	cv.draw_rect(bar, Color(0, 0, 0, 0.6))
+	cv.draw_rect(Rect2(bar.position, Vector2(bar.size.x * t, bar.size.y)), Color(0.5, 1.0, 0.3))
 	_text("HARVESTING BIOMASS", Vector2(w * 0.5, h * 0.33 - 10), 22, Color(0.7, 1.0, 0.5))
 
 
@@ -3340,66 +3619,68 @@ func _draw_pilot_gun(w: float, h: float) -> void:
 	var n := Vector2(-dir.y, dir.x)
 	# Gloved hand and sleeve
 	var grip := base.lerp(tip, 0.3)
-	draw_colored_polygon(PackedVector2Array([Vector2(w + 20, h + 20), Vector2(w * 0.8, h + 20), grip - n * 20 + dir * 10, grip + n * 30 - dir * 10]), Color(0.85, 0.72, 0.12) if hazmat else Color(0.22, 0.25, 0.2))
-	draw_circle(grip + n * 4, 26.0, _glove_col())
+	cv.draw_colored_polygon(PackedVector2Array([Vector2(w + 20, h + 20), Vector2(w * 0.8, h + 20), grip - n * 20 + dir * 10, grip + n * 30 - dir * 10]), Color(0.85, 0.72, 0.12) if hazmat else Color(0.22, 0.25, 0.2))
+	cv.draw_circle(grip + n * 4, 26.0, _glove_col())
 	# Gun body, magazine, barrel and sight
-	draw_colored_polygon(PackedVector2Array([base + n * 30, base - n * 26, tip - n * 12, tip + n * 14]), Color(0.2, 0.21, 0.23))
-	draw_polyline(PackedVector2Array([base + n * 30, tip + n * 14, tip - n * 12]), Color(0.38, 0.4, 0.43), 2.0)
+	cv.draw_colored_polygon(PackedVector2Array([base + n * 30, base - n * 26, tip - n * 12, tip + n * 14]), Color(0.2, 0.21, 0.23))
+	cv.draw_polyline(PackedVector2Array([base + n * 30, tip + n * 14, tip - n * 12]), Color(0.38, 0.4, 0.43), 2.0)
 	var mag := base.lerp(tip, 0.45)
-	draw_colored_polygon(PackedVector2Array([mag - n * 14, mag - n * 14 + dir * 22, mag - n * 52 + dir * 16, mag - n * 50 - dir * 4]), Color(0.14, 0.14, 0.15))
-	draw_line(tip, muz, Color(0.1, 0.1, 0.11), 10.0)
+	cv.draw_colored_polygon(PackedVector2Array([mag - n * 14, mag - n * 14 + dir * 22, mag - n * 52 + dir * 16, mag - n * 50 - dir * 4]), Color(0.14, 0.14, 0.15))
+	cv.draw_line(tip, muz, Color(0.1, 0.1, 0.11), 10.0)
 	# Left hand gripping the barrel: palm underneath, fingers wrapped over
 	# the top, arm coming in from the bottom left.
 	var fore := base.lerp(tip, 0.74)
 	var sleeve := Color(0.85, 0.72, 0.12) if hazmat else Color(0.22, 0.25, 0.2)
 	var gc := _glove_col()
-	draw_colored_polygon(PackedVector2Array([Vector2(w * 0.28, h + 40), Vector2(w * 0.44, h + 40), fore - n * 10.0 + dir * 22.0, fore - n * 34.0 - dir * 6.0]), sleeve)
-	draw_colored_polygon(PackedVector2Array([fore - n * 12.0 - dir * 20.0, fore - n * 12.0 + dir * 24.0, fore - n * 38.0 + dir * 18.0, fore - n * 40.0 - dir * 14.0]), gc)
+	cv.draw_colored_polygon(PackedVector2Array([Vector2(w * 0.28, h + 40), Vector2(w * 0.44, h + 40), fore - n * 10.0 + dir * 22.0, fore - n * 34.0 - dir * 6.0]), sleeve)
+	cv.draw_colored_polygon(PackedVector2Array([fore - n * 12.0 - dir * 20.0, fore - n * 12.0 + dir * 24.0, fore - n * 38.0 + dir * 18.0, fore - n * 40.0 - dir * 14.0]), gc)
 	for k in 4:
 		var fp := fore + dir * (-14.0 + k * 11.0)
-		draw_line(fp - n * 14.0, fp + n * 15.0, gc.darkened(0.45), 10.0)
-		draw_line(fp - n * 13.0, fp + n * 13.0, gc, 7.0)
-	draw_line(fore - n * 16.0 - dir * 22.0, fore + n * 4.0 - dir * 26.0, gc, 9.0)
+		cv.draw_line(fp - n * 14.0, fp + n * 15.0, gc.darkened(0.45), 10.0)
+		cv.draw_line(fp - n * 13.0, fp + n * 13.0, gc, 7.0)
+	cv.draw_line(fore - n * 16.0 - dir * 22.0, fore + n * 4.0 - dir * 26.0, gc, 9.0)
 	var sight := base.lerp(tip, 0.7) + n * 16
-	draw_rect(Rect2(sight - Vector2(5, 9), Vector2(10, 9)), Color(0.12, 0.12, 0.13))
-	draw_circle(sight + Vector2(0, -4), 2.0, Color(0.4, 1.0, 0.6))
+	cv.draw_rect(Rect2(sight - Vector2(5, 9), Vector2(10, 9)), Color(0.12, 0.12, 0.13))
+	cv.draw_circle(sight + Vector2(0, -4), 2.0, Color(0.4, 1.0, 0.6))
 	if muzzle[0] > 0.0:
-		draw_circle(muz + dir * 10.0, 22.0, Color(1.0, 0.75, 0.3, 0.55))
-		draw_circle(muz + dir * 6.0, 11.0, Color(1.0, 0.97, 0.8))
+		cv.draw_texture_rect(surf["glow"], Rect2(muz + dir * 10.0 - Vector2(70, 70), Vector2(140, 140)), false, Color(1.0, 0.7, 0.3, 0.5))
+		cv.draw_set_transform(muz + dir * 12.0, dir.angle() + PI * 0.5, Vector2(0.7, 1.4))
+		cv.draw_texture_rect(surf["fire"], Rect2(-22, -22, 44, 44), false, Color(1, 1, 1, 1))
+		cv.draw_set_transform(Vector2.ZERO)
 
 
 func _draw_visor(w: float, h: float) -> void:
 	if hazmat:
 		# Hazmat hood: a yellow-rimmed faceplate, slightly fogged.
-		draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(0.9, 0.95, 0.6, 0.06))
+		cv.draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(0.9, 0.95, 0.6, 0.06))
 		var y := Color(0.85, 0.72, 0.12, 0.95)
-		draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w * 0.12, -40), Vector2(-40, h * 0.45)]), y)
-		draw_colored_polygon(PackedVector2Array([Vector2(w + 40, -40), Vector2(w * 0.88, -40), Vector2(w + 40, h * 0.45)]), y)
-		draw_colored_polygon(PackedVector2Array([Vector2(-40, h + 40), Vector2(-40, h * 0.7), Vector2(w * 0.08, h + 40)]), y)
-		draw_colored_polygon(PackedVector2Array([Vector2(w + 40, h + 40), Vector2(w + 40, h * 0.7), Vector2(w * 0.92, h + 40)]), y)
+		cv.draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w * 0.12, -40), Vector2(-40, h * 0.45)]), y)
+		cv.draw_colored_polygon(PackedVector2Array([Vector2(w + 40, -40), Vector2(w * 0.88, -40), Vector2(w + 40, h * 0.45)]), y)
+		cv.draw_colored_polygon(PackedVector2Array([Vector2(-40, h + 40), Vector2(-40, h * 0.7), Vector2(w * 0.08, h + 40)]), y)
+		cv.draw_colored_polygon(PackedVector2Array([Vector2(w + 40, h + 40), Vector2(w + 40, h * 0.7), Vector2(w * 0.92, h + 40)]), y)
 		var breath := 0.5 + 0.5 * sin(time * 1.6)
-		draw_circle(Vector2(w * 0.5, h * 1.05), w * 0.12, Color(1, 1, 1, 0.05 * breath))
+		cv.draw_circle(Vector2(w * 0.5, h * 1.05), w * 0.12, Color(1, 1, 1, 0.05 * breath))
 	# Helmet visor edges.
 	var c := Color(0.02, 0.03, 0.03, 0.85)
-	draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w + 40, -40), Vector2(w + 40, h * 0.06), Vector2(w * 0.75, h * 0.02), Vector2(w * 0.25, h * 0.02), Vector2(-40, h * 0.06)]), c)
-	draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w * 0.04, -40), Vector2(-40, h * 0.3)]), c)
-	draw_colored_polygon(PackedVector2Array([Vector2(w + 40, -40), Vector2(w * 0.96, -40), Vector2(w + 40, h * 0.3)]), c)
-	draw_line(Vector2(w * 0.25, h * 0.02), Vector2(w * 0.75, h * 0.02), Color(0.4, 1.0, 0.6, 0.25), 2.0)
+	cv.draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w + 40, -40), Vector2(w + 40, h * 0.06), Vector2(w * 0.75, h * 0.02), Vector2(w * 0.25, h * 0.02), Vector2(-40, h * 0.06)]), c)
+	cv.draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w * 0.04, -40), Vector2(-40, h * 0.3)]), c)
+	cv.draw_colored_polygon(PackedVector2Array([Vector2(w + 40, -40), Vector2(w * 0.96, -40), Vector2(w + 40, h * 0.3)]), c)
+	cv.draw_line(Vector2(w * 0.25, h * 0.02), Vector2(w * 0.75, h * 0.02), Color(0.4, 1.0, 0.6, 0.25), 2.0)
 	if hit_flash > 0.0:
-		draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(1, 0.1, 0.05, hit_flash * 0.8))
+		cv.draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(1, 0.1, 0.05, hit_flash * 0.8))
 	if pilot_hp < pilot_max_hp * 0.35:
 		var pulse := 0.15 + 0.12 * sin(time * 7.0)
-		draw_rect(Rect2(-40, -40, w + 80, 60), Color(1, 0, 0, pulse))
-		draw_rect(Rect2(-40, h - 20, w + 80, 60), Color(1, 0, 0, pulse))
+		cv.draw_rect(Rect2(-40, -40, w + 80, 60), Color(1, 0, 0, pulse))
+		cv.draw_rect(Rect2(-40, h - 20, w + 80, 60), Color(1, 0, 0, pulse))
 
 
 func _draw_climb_overlay(w: float, h: float) -> void:
 	var t := _climb_progress()
 	var a := sin(t * PI) * 0.92
-	draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(0.0, 0.0, 0.0, a))
+	cv.draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(0.0, 0.0, 0.0, a))
 	# Hatch frame sliding past
 	var off := (t - 0.5) * h * (1.0 if climb_out else -1.0)
-	draw_rect(Rect2(w * 0.2, h * 0.5 + off - 6.0, w * 0.6, 12.0), Color(0.5, 0.5, 0.45, a * 0.8))
+	cv.draw_rect(Rect2(w * 0.2, h * 0.5 + off - 6.0, w * 0.6, 12.0), Color(0.5, 0.5, 0.45, a * 0.8))
 	_text("CLIMBING OUT…" if climb_out else "CLIMBING IN…", Vector2(w * 0.5, h * 0.45), 30, Color(0.4, 1.0, 0.6, a))
 
 
@@ -3418,8 +3699,8 @@ func _draw_tracers(w: float, h: float, horizon: float, proj_scale: float) -> voi
 			continue
 		var end := Vector2(pr.x, horizon + (eye_z - t["z"]) * proj_scale / pr.y)
 		var start := _muzzle_pos(t["g"], w, h)
-		draw_line(start, end, Color(1.0, 0.85, 0.4, 0.8), 3.0)
-		draw_line(start, start.lerp(end, 0.4), Color(1, 1, 0.9, 0.9), 1.5)
+		cv.draw_line(start, end, Color(1.0, 0.85, 0.4, 0.8), 3.0)
+		cv.draw_line(start, start.lerp(end, 0.4), Color(1, 1, 0.9, 0.9), 1.5)
 
 
 func _draw_guns(w: float, h: float) -> void:
@@ -3431,22 +3712,28 @@ func _draw_guns(w: float, h: float) -> void:
 		var dir := (tip - base).normalized()
 		var n := Vector2(-dir.y, dir.x)
 		var body_col := Color(0.26, 0.28, 0.3) if alive else Color(0.12, 0.1, 0.1)
+		body_col = Color(body_col.r * tint.r * 1.2, body_col.g * tint.g * 1.2, body_col.b * tint.b * 1.2)
 		var poly := PackedVector2Array([base + n * 56, base - n * 56, tip - n * 18, tip + n * 18])
-		draw_colored_polygon(poly, body_col)
-		draw_polyline(PackedVector2Array([base + n * 56, tip + n * 18, tip - n * 18]), Color(0.45, 0.48, 0.5), 2.0)
+		# Gunmetal: light catching the upper edge, darker underneath.
+		var hi_c := body_col.lightened(0.35)
+		var lo_c := body_col.darkened(0.45)
+		cv.draw_polygon(poly, PackedColorArray([hi_c if g == 1 else lo_c, lo_c if g == 1 else hi_c, lo_c if g == 1 else hi_c, hi_c if g == 1 else lo_c]))
+		cv.draw_polyline(PackedVector2Array([base + n * 56, tip + n * 18, tip - n * 18]), Color(0.45, 0.48, 0.5), 2.0)
 		# Barrel shroud with cooling slots
 		for i in 3:
 			var p := tip.lerp(base, 0.15 + i * 0.12)
-			draw_line(p + n * 14, p - n * 14, Color(0.1, 0.1, 0.12), 3.0)
+			cv.draw_line(p + n * 14, p - n * 14, Color(0.1, 0.1, 0.12), 3.0)
 		if not alive:
 			if rng.randf() < 0.35:
 				var sp := tip.lerp(base, rng.randf_range(0.0, 0.5))
-				draw_line(sp, sp + Vector2.from_angle(rng.randf() * TAU) * 14.0, Color(1.0, 0.85, 0.3), 2.0)
+				cv.draw_line(sp, sp + Vector2.from_angle(rng.randf() * TAU) * 14.0, Color(1.0, 0.85, 0.3), 2.0)
 			continue
 		if muzzle[g] > 0.0:
-			var fl := tip + dir * 26.0
-			draw_circle(fl, 30.0, Color(1.0, 0.7, 0.2, 0.55))
-			draw_circle(fl, 16.0, Color(1.0, 0.95, 0.75))
+			var fl := tip + dir * 30.0
+			cv.draw_texture_rect(surf["glow"], Rect2(fl - Vector2(110, 110), Vector2(220, 220)), false, Color(1.0, 0.7, 0.3, 0.55))
+			cv.draw_set_transform(fl, dir.angle() + PI * 0.5 + rng.randf_range(-0.3, 0.3), Vector2(0.8, 1.6))
+			cv.draw_texture_rect(surf["fire"], Rect2(-34, -34, 68, 68), false, Color(1, 1, 1, 1))
+			cv.draw_set_transform(Vector2.ZERO)
 
 
 func _draw_cockpit(w: float, h: float) -> void:
@@ -3457,37 +3744,46 @@ func _draw_cockpit(w: float, h: float) -> void:
 	var right := PackedVector2Array([Vector2(w + 40, h * 0.05), Vector2(w * 0.965, h * 0.07), Vector2(w * 0.93, h * 0.88), Vector2(w + 40, h * 0.9)])
 	var bottom := PackedVector2Array([Vector2(-40, h + 40), Vector2(-40, h * 0.89), Vector2(w * 0.2, h * 0.87), Vector2(w * 0.35, h * 0.905), Vector2(w * 0.65, h * 0.905), Vector2(w * 0.8, h * 0.87), Vector2(w + 40, h * 0.89), Vector2(w + 40, h + 40)])
 	for poly in [top, left, right, bottom]:
-		draw_colored_polygon(poly, frame)
-	draw_polyline(PackedVector2Array([Vector2(0, h * 0.07), Vector2(w * 0.2, h * 0.105), Vector2(w * 0.8, h * 0.105), Vector2(w, h * 0.07)]), edge, 2.0)
-	draw_line(Vector2(w * 0.035, h * 0.07), Vector2(w * 0.07, h * 0.88), edge, 2.0)
-	draw_line(Vector2(w * 0.965, h * 0.07), Vector2(w * 0.93, h * 0.88), edge, 2.0)
-	draw_polyline(PackedVector2Array([Vector2(0, h * 0.89), Vector2(w * 0.2, h * 0.87), Vector2(w * 0.35, h * 0.905), Vector2(w * 0.65, h * 0.905), Vector2(w * 0.8, h * 0.87), Vector2(w, h * 0.89)]), edge, 2.0)
+		cv.draw_colored_polygon(poly, frame)
+	# Panel shading: lighter metal along the canopy edges.
+	cv.draw_polygon(PackedVector2Array([Vector2(-40, h * 0.04), Vector2(w + 40, h * 0.04), Vector2(w + 40, h * 0.07), Vector2(w * 0.8, h * 0.105), Vector2(w * 0.2, h * 0.105), Vector2(-40, h * 0.07)]),
+		PackedColorArray([frame, frame, Color(0.2, 0.21, 0.23), Color(0.24, 0.25, 0.27), Color(0.24, 0.25, 0.27), Color(0.2, 0.21, 0.23)]))
+	cv.draw_polygon(PackedVector2Array([Vector2(-40, h * 0.92), Vector2(w * 0.2, h * 0.895), Vector2(w * 0.35, h * 0.93), Vector2(w * 0.65, h * 0.93), Vector2(w * 0.8, h * 0.895), Vector2(w + 40, h * 0.92), Vector2(w + 40, h * 0.89), Vector2(w * 0.8, h * 0.87), Vector2(w * 0.65, h * 0.905), Vector2(w * 0.35, h * 0.905), Vector2(w * 0.2, h * 0.87), Vector2(-40, h * 0.89)]),
+		PackedColorArray([frame, frame, frame, frame, frame, frame, Color(0.22, 0.23, 0.26), Color(0.22, 0.23, 0.26), Color(0.26, 0.27, 0.3), Color(0.26, 0.27, 0.3), Color(0.22, 0.23, 0.26), Color(0.22, 0.23, 0.26)]))
+	# Dust and smudges on the canopy glass, catching the light.
+	var gl := tint.lightened(0.2)
+	gl.a = 1.0
+	cv.draw_texture_rect(surf["glass"], Rect2(w * 0.03, h * 0.07, w * 0.94, h * 0.83), false, gl)
+	cv.draw_polyline(PackedVector2Array([Vector2(0, h * 0.07), Vector2(w * 0.2, h * 0.105), Vector2(w * 0.8, h * 0.105), Vector2(w, h * 0.07)]), edge, 2.0)
+	cv.draw_line(Vector2(w * 0.035, h * 0.07), Vector2(w * 0.07, h * 0.88), edge, 2.0)
+	cv.draw_line(Vector2(w * 0.965, h * 0.07), Vector2(w * 0.93, h * 0.88), edge, 2.0)
+	cv.draw_polyline(PackedVector2Array([Vector2(0, h * 0.89), Vector2(w * 0.2, h * 0.87), Vector2(w * 0.35, h * 0.905), Vector2(w * 0.65, h * 0.905), Vector2(w * 0.8, h * 0.87), Vector2(w, h * 0.89)]), edge, 2.0)
 	# Rivets
 	for i in 9:
-		draw_circle(Vector2(w * (0.25 + i * 0.0625), h * 0.05), 3.0, Color(0.2, 0.22, 0.25))
+		cv.draw_circle(Vector2(w * (0.25 + i * 0.0625), h * 0.05), 3.0, Color(0.2, 0.22, 0.25))
 
 	# Glass reflections and cracks
-	draw_line(Vector2(w * 0.12, h * 0.2), Vector2(w * 0.2, h * 0.12), Color(1, 1, 1, 0.05), 6.0)
-	draw_line(Vector2(w * 0.86, h * 0.75), Vector2(w * 0.9, h * 0.68), Color(1, 1, 1, 0.04), 8.0)
+	cv.draw_line(Vector2(w * 0.12, h * 0.2), Vector2(w * 0.2, h * 0.12), Color(1, 1, 1, 0.05), 6.0)
+	cv.draw_line(Vector2(w * 0.86, h * 0.75), Vector2(w * 0.9, h * 0.68), Color(1, 1, 1, 0.04), 8.0)
 	var torso_r: float = parts["torso"] / GameState.max_hp("torso")
 	for cr in cracks:
 		if torso_r < cr["threshold"]:
 			var pts := PackedVector2Array()
 			for p: Vector2 in cr["pts"]:
 				pts.append(Vector2(p.x * w, p.y * h))
-			draw_polyline(pts, Color(0.9, 0.95, 1.0, 0.5), 1.5)
+			cv.draw_polyline(pts, Color(0.9, 0.95, 1.0, 0.5), 1.5)
 
 	if hit_flash > 0.0:
-		draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(1, 0.1, 0.05, hit_flash * 0.8))
+		cv.draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(1, 0.1, 0.05, hit_flash * 0.8))
 	if torso_r < 0.3 and state == State.PLAYING:
 		var pulse := 0.12 + 0.1 * sin(time * 6.0)
-		draw_rect(Rect2(-40, -40, w + 80, 70), Color(1, 0, 0, pulse))
-		draw_rect(Rect2(-40, h - 30, w + 80, 70), Color(1, 0, 0, pulse))
+		cv.draw_rect(Rect2(-40, -40, w + 80, 70), Color(1, 0, 0, pulse))
+		cv.draw_rect(Rect2(-40, h - 30, w + 80, 70), Color(1, 0, 0, pulse))
 
 
 func _text(t: String, center: Vector2, size: int, c: Color) -> void:
 	var tw := font.get_string_size(t, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
-	draw_string(font, Vector2(center.x - tw * 0.5, center.y), t, HORIZONTAL_ALIGNMENT_LEFT, -1, size, c)
+	cv.draw_string(font, Vector2(center.x - tw * 0.5, center.y), t, HORIZONTAL_ALIGNMENT_LEFT, -1, size, c)
 
 
 func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
@@ -3496,13 +3792,13 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	var cc := Vector2(w * 0.5, h * 0.5)
 	# Horizon ticks so you can tell how far up or down you're looking.
 	for sgn in [-1.0, 1.0]:
-		draw_line(Vector2(w * 0.5 + sgn * 70.0, horizon), Vector2(w * 0.5 + sgn * 120.0, horizon), Color(0.4, 1.0, 0.6, 0.45), 2.0)
+		cv.draw_line(Vector2(w * 0.5 + sgn * 70.0, horizon), Vector2(w * 0.5 + sgn * 120.0, horizon), Color(0.4, 1.0, 0.6, 0.45), 2.0)
 	var ch_col := Color(1.0, 0.3, 0.2) if locked else hud
 	var ch_r := 12.0 if on_foot else 22.0
-	draw_arc(cc, ch_r, 0, TAU, 32, ch_col, 2.0)
+	cv.draw_arc(cc, ch_r, 0, TAU, 32, ch_col, 2.0)
 	for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
-		draw_line(cc + d * ch_r * 0.45, cc + d * ch_r * 1.35, ch_col, 2.0)
-	draw_circle(cc, 2.0, ch_col)
+		cv.draw_line(cc + d * ch_r * 0.45, cc + d * ch_r * 1.35, ch_col, 2.0)
+	cv.draw_circle(cc, 2.0, ch_col)
 
 	# Objective bar
 	_text(_objective_string(), Vector2(w * 0.5, h * 0.06 + 30.0), 20, Color(1.0, 0.9, 0.4) if objective_done else hud)
@@ -3511,34 +3807,34 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 		var line := "%s: %s" % [String(who["name"]).to_upper(), radio_text]
 		var tw := font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, 17).x
 		var ra := clampf(radio_t, 0.0, 1.0)
-		draw_rect(Rect2(w * 0.5 - tw * 0.5 - 10, h * 0.06 + 42.0, tw + 20, 28), Color(0, 0, 0, 0.55 * ra))
+		cv.draw_rect(Rect2(w * 0.5 - tw * 0.5 - 10, h * 0.06 + 42.0, tw + 20, 28), Color(0, 0, 0, 0.55 * ra))
 		var wc: Color = who["color"]
 		wc.a = ra
 		_text(line, Vector2(w * 0.5, h * 0.06 + 62.0), 17, wc)
 
 	# Retreat button
 	var rr := _retreat_rect()
-	draw_rect(rr, Color(0.05, 0.06, 0.07, 0.8))
-	draw_rect(rr, hud, false, 2.0)
-	draw_rect(Rect2(rr.position + Vector2(18, 13), Vector2(6, 20)), hud)
-	draw_rect(Rect2(rr.position + Vector2(30, 13), Vector2(6, 20)), hud)
+	cv.draw_rect(rr, Color(0.05, 0.06, 0.07, 0.8))
+	cv.draw_rect(rr, hud, false, 2.0)
+	cv.draw_rect(Rect2(rr.position + Vector2(18, 13), Vector2(6, 20)), hud)
+	cv.draw_rect(Rect2(rr.position + Vector2(30, 13), Vector2(6, 20)), hud)
 	_text("MENU", rr.get_center() + Vector2(14, 7), 18, hud)
 
 	# Mech status
 	var panel := Rect2(16, 72, 150, 150)
-	draw_rect(panel, Color(0.02, 0.06, 0.04, 0.75))
-	draw_rect(panel, Color(0.2, 0.5, 0.3), false, 1.5)
+	cv.draw_rect(panel, Color(0.02, 0.06, 0.04, 0.75))
+	cv.draw_rect(panel, Color(0.2, 0.5, 0.3), false, 1.5)
 	var ratios := {}
 	for p in GameState.PARTS:
 		ratios[p] = parts[p] / GameState.max_hp(p)
-	MechDiagram.draw_mech(self, panel.get_center() + Vector2(0, -2), 1.1, ratios, fmod(time, 0.6) < 0.3)
+	MechDiagram.draw_mech(cv, panel.get_center() + Vector2(0, -2), 1.1, ratios, fmod(time, 0.6) < 0.3)
 	if on_foot:
 		_text("MECH PARKED", Vector2(panel.get_center().x, panel.end.y - 6.0), 14, Color(1.0, 0.85, 0.3))
 		var pb := Rect2(16, panel.end.y + 8.0, 150, 18)
 		var ratio := pilot_hp / pilot_max_hp
-		draw_rect(pb, Color(0, 0, 0, 0.6))
-		draw_rect(Rect2(pb.position, Vector2(pb.size.x * ratio, pb.size.y)), MechDiagram.part_color(ratio))
-		draw_rect(pb, hud, false, 1.0)
+		cv.draw_rect(pb, Color(0, 0, 0, 0.6))
+		cv.draw_rect(Rect2(pb.position, Vector2(pb.size.x * ratio, pb.size.y)), MechDiagram.part_color(ratio))
+		cv.draw_rect(pb, hud, false, 1.0)
 		_text("PILOT %d/%d" % [int(ceil(pilot_hp)), int(pilot_max_hp)], pb.get_center() + Vector2(0, 6), 14, Color.WHITE)
 
 	_draw_minimap(w)
@@ -3561,16 +3857,16 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 					label = "BOARD (GET LEVEL)"
 					lit = false
 		var glow := lit and on_foot and fmod(time, 0.8) < 0.4
-		draw_rect(mb, Color(0.1, 0.3, 0.15, 0.9) if glow else Color(0.05, 0.08, 0.07, 0.85))
-		draw_rect(mb, hud if lit else Color(0.3, 0.45, 0.35), false, 2.0)
+		cv.draw_rect(mb, Color(0.1, 0.3, 0.15, 0.9) if glow else Color(0.05, 0.08, 0.07, 0.85))
+		cv.draw_rect(mb, hud if lit else Color(0.3, 0.45, 0.35), false, 2.0)
 		_text(label, mb.get_center() + Vector2(0, 7), 17, hud if lit else Color(0.5, 0.65, 0.55))
 		var act := _action()
 		if not act.is_empty():
 			var ab := _action_rect(Vector2(w, h))
 			var en: bool = act[1]
 			var acol := Color(1.0, 0.8, 0.3) if en else Color(0.6, 0.55, 0.4)
-			draw_rect(ab, Color(0.25, 0.18, 0.04, 0.9) if en and fmod(time, 1.0) < 0.5 else Color(0.08, 0.07, 0.05, 0.85))
-			draw_rect(ab, acol, false, 2.0)
+			cv.draw_rect(ab, Color(0.25, 0.18, 0.04, 0.9) if en and fmod(time, 1.0) < 0.5 else Color(0.08, 0.07, 0.05, 0.85))
+			cv.draw_rect(ab, acol, false, 2.0)
 			_text(act[0], ab.get_center() + Vector2(0, 7), 16, acol)
 
 	if on_foot:
@@ -3591,9 +3887,9 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	_text(gun_txt, Vector2(w * 0.5 - 130, cy), 18, hud if ammo_left["shells"] > 0 else Color(1, 0.3, 0.2))
 	var bar := Rect2(w * 0.5 + 10, cy - 15, 180, 16)
 	var rk_ready := clampf(1.0 - rocket_cd / GameState.rocket_cooldown(), 0.0, 1.0)
-	draw_rect(bar, Color(0, 0, 0, 0.6))
-	draw_rect(Rect2(bar.position, Vector2(bar.size.x * rk_ready, bar.size.y)), Color(1.0, 0.6, 0.15) if rk_ready >= 1.0 else Color(0.5, 0.35, 0.15))
-	draw_rect(bar, hud, false, 1.0)
+	cv.draw_rect(bar, Color(0, 0, 0, 0.6))
+	cv.draw_rect(Rect2(bar.position, Vector2(bar.size.x * rk_ready, bar.size.y)), Color(1.0, 0.6, 0.15) if rk_ready >= 1.0 else Color(0.5, 0.35, 0.15))
+	cv.draw_rect(bar, hud, false, 1.0)
 	_text(("%s ROCKETS" % _ammo_str("rockets")) + (" READY" if rk_ready >= 1.0 else " · RELOADING"), bar.get_center() + Vector2(0, 30), 14, hud if ammo_left["rockets"] > 0 else Color(1, 0.3, 0.2))
 
 	_draw_hud_messages(w, h, cc)
@@ -3615,7 +3911,7 @@ func _draw_hud_messages(w: float, h: float, cc: Vector2) -> void:
 		var p := cc + Vector2(v.x * w * 0.3, v.y * h * 0.3)
 		var n := Vector2(-v.y, v.x)
 		var a2: float = clampf(d["t"], 0.0, 1.0)
-		draw_colored_polygon(PackedVector2Array([p + v * 22.0, p - v * 6.0 + n * 26.0, p - v * 6.0 - n * 26.0]), Color(1, 0.15, 0.1, a2 * 0.85))
+		cv.draw_colored_polygon(PackedVector2Array([p + v * 22.0, p - v * 6.0 + n * 26.0, p - v * 6.0 - n * 26.0]), Color(1, 0.15, 0.1, a2 * 0.85))
 
 	if time < 9.0 and state == State.PLAYING and Settings.show_hints:
 		var fade := clampf(9.0 - time, 0.0, 1.0)
@@ -3624,7 +3920,7 @@ func _draw_hud_messages(w: float, h: float, cc: Vector2) -> void:
 
 func _draw_minimap(w: float) -> void:
 	var mm := Rect2(w - 206, 14, 190, 190)
-	draw_rect(mm, Color(0.02, 0.07, 0.05, 0.85))
+	cv.draw_rect(mm, Color(0.02, 0.07, 0.05, 0.85))
 	var radius := 9
 	var cs := mm.size.x / (2.0 * radius)
 	var center := mm.get_center()
@@ -3656,7 +3952,7 @@ func _draw_minimap(w: float) -> void:
 				continue
 			var r := Rect2(center + (Vector2(gx, gy) - pos) * cs, Vector2(cs, cs)).intersection(mm)
 			if r.has_area():
-				draw_rect(r, c)
+				cv.draw_rect(r, c)
 	for a in aliens:
 		if a["dead"]:
 			continue
@@ -3666,17 +3962,17 @@ func _draw_minimap(w: float) -> void:
 		var p := center + rel * cs
 		if _is_nest(a):
 			var pulse := 6.0 + 2.0 * sin(time * 4.0)
-			draw_rect(Rect2(p - Vector2(pulse, pulse), Vector2(pulse, pulse) * 2.0), Color(0.9, 0.3, 1.0))
+			cv.draw_rect(Rect2(p - Vector2(pulse, pulse), Vector2(pulse, pulse) * 2.0), Color(0.9, 0.3, 1.0))
 		elif a.get("under", false):
 			# Seismic contact: a pulsing ring.
 			if a["awake"]:
-				draw_arc(p, 3.0 + fmod(time * 8.0, 6.0), 0, TAU, 10, Color(0.9, 0.6, 0.3, 0.9), 1.5)
+				cv.draw_arc(p, 3.0 + fmod(time * 8.0, 6.0), 0, TAU, 10, Color(0.9, 0.6, 0.3, 0.9), 1.5)
 		elif a["kind"] == "flyer":
 			var fv := Vector2.from_angle(a["face"])
 			var col := Color(1.0, 0.55, 0.2) if a["awake"] else Color(0.8, 0.55, 0.2)
-			draw_colored_polygon(PackedVector2Array([p + fv * 6.0, p + fv.rotated(2.4) * 5.0, p + fv.rotated(-2.4) * 5.0]), col)
+			cv.draw_colored_polygon(PackedVector2Array([p + fv * 6.0, p + fv.rotated(2.4) * 5.0, p + fv.rotated(-2.4) * 5.0]), col)
 		else:
-			draw_circle(p, 3.5 if a["kind"] != "brute" else 5.5, Color(1.0, 0.25, 0.2) if a["awake"] else Color(0.8, 0.55, 0.2))
+			cv.draw_circle(p, 3.5 if a["kind"] != "brute" else 5.5, Color(1.0, 0.25, 0.2) if a["awake"] else Color(0.8, 0.55, 0.2))
 	var mpulse := 0.5 + 0.5 * sin(time * 5.0)
 	if not survival:
 		for cp in corpses:
@@ -3684,85 +3980,85 @@ func _draw_minimap(w: float) -> void:
 				continue
 			var crl: Vector2 = cp["pos"] - pos
 			if absf(crl.x) < radius - 0.3 and absf(crl.y) < radius - 0.3:
-				draw_rect(Rect2(center + crl * cs - Vector2(2, 2), Vector2(4, 4)), Color(0.5, 0.9, 0.3, 0.7))
+				cv.draw_rect(Rect2(center + crl * cs - Vector2(2, 2), Vector2(4, 4)), Color(0.5, 0.9, 0.3, 0.7))
 		for pk in pickups:
 			var prl: Vector2 = pk["pos"] - pos
 			if absf(prl.x) < radius - 0.3 and absf(prl.y) < radius - 0.3:
-				draw_rect(Rect2(center + prl * cs - Vector2(3, 3), Vector2(6, 6)), Color(1.0, 0.85, 0.2))
+				cv.draw_rect(Rect2(center + prl * cs - Vector2(3, 3), Vector2(6, 6)), Color(1.0, 0.85, 0.2))
 	for sv2 in survivors_list:
 		if sv2["freed"] and not sv2.get("strapped", false) and not sv2.get("dead", false):
 			var frl: Vector2 = sv2["pos"] - pos
 			if absf(frl.x) < radius - 0.3 and absf(frl.y) < radius - 0.3:
-				draw_circle(center + frl * cs, 3.0, Color(0.6, 1.0, 1.0))
+				cv.draw_circle(center + frl * cs, 3.0, Color(0.6, 1.0, 1.0))
 	for c in crew:
 		if c["state"] == "in":
 			continue
 		var crl2: Vector2 = c["pos"] - pos
 		if absf(crl2.x) < radius - 0.3 and absf(crl2.y) < radius - 0.3:
-			draw_circle(center + crl2 * cs, 2.5, Color(1.0, 0.9, 0.2))
+			cv.draw_circle(center + crl2 * cs, 2.5, Color(1.0, 0.9, 0.2))
 	if not chest.is_empty():
 		var chr: Vector2 = chest["pos"] - pos
 		var chc := Color(1.0, 0.65, 0.15)
 		if absf(chr.x) < radius - 0.3 and absf(chr.y) < radius - 0.3:
 			var q := center + chr * cs
-			draw_rect(Rect2(q - Vector2(5, 4), Vector2(10, 8)), chc)
-			draw_rect(Rect2(q - Vector2(5, 4), Vector2(10, 8)), Color(0, 0, 0), false, 1.0)
+			cv.draw_rect(Rect2(q - Vector2(5, 4), Vector2(10, 8)), chc)
+			cv.draw_rect(Rect2(q - Vector2(5, 4), Vector2(10, 8)), Color(0, 0, 0), false, 1.0)
 		else:
-			var cv := chr.normalized()
-			draw_rect(Rect2(center + cv * (mm.size.x * 0.5 - 8.0) - Vector2(4, 3), Vector2(8, 6)), chc)
+			var chv := chr.normalized()
+			cv.draw_rect(Rect2(center + chv * (mm.size.x * 0.5 - 8.0) - Vector2(4, 3), Vector2(8, 6)), chc)
 	for sv in survivors_list:
 		if sv["freed"]:
 			continue
 		var srel: Vector2 = sv["pos"] - pos
 		if absf(srel.x) < radius - 0.3 and absf(srel.y) < radius - 0.3:
-			draw_circle(center + srel * cs, 4.0, Color(1, 1, 1, 0.6 + 0.4 * mpulse))
+			cv.draw_circle(center + srel * cs, 4.0, Color(1, 1, 1, 0.6 + 0.4 * mpulse))
 	for it in cargo:
 		if it["taken"]:
 			continue
 		var irel: Vector2 = it["pos"] - pos
 		if absf(irel.x) < radius - 0.3 and absf(irel.y) < radius - 0.3:
-			draw_rect(Rect2(center + irel * cs - Vector2(4, 4), Vector2(8, 8)), Color(0.4, 0.9, 1.0))
+			cv.draw_rect(Rect2(center + irel * cs - Vector2(4, 4), Vector2(8, 8)), Color(0.4, 0.9, 1.0))
 		else:
 			var iv := irel.normalized()
-			draw_circle(center + iv * (mm.size.x * 0.5 - 8.0), 3.5, Color(0.4, 0.9, 1.0))
+			cv.draw_circle(center + iv * (mm.size.x * 0.5 - 8.0), 3.5, Color(0.4, 0.9, 1.0))
 	for b in beacons:
 		var brel: Vector2 = b["pos"] - pos
 		var bc := Color(0.3, 1.0, 0.5) if b["done"] else Color(0.3, 0.8, 1.0)
 		if absf(brel.x) < radius - 0.3 and absf(brel.y) < radius - 0.3:
-			draw_arc(center + brel * cs, 6.0, 0, TAU, 12, bc, 2.0)
+			cv.draw_arc(center + brel * cs, 6.0, 0, TAU, 12, bc, 2.0)
 		elif not b["done"]:
 			var bv := brel.normalized()
-			draw_circle(center + bv * (mm.size.x * 0.5 - 8.0), 3.5, bc)
+			cv.draw_circle(center + bv * (mm.size.x * 0.5 - 8.0), 3.5, bc)
 	for bp: Vector2 in breaches:
 		var prel := bp - pos
 		if absf(prel.x) < radius - 0.3 and absf(prel.y) < radius - 0.3:
 			var q := center + prel * cs
-			draw_line(q - Vector2(4, 4), q + Vector2(4, 4), Color(1, 0.3, 0.3), 2.0)
-			draw_line(q - Vector2(4, -4), q + Vector2(4, -4), Color(1, 0.3, 0.3), 2.0)
+			cv.draw_line(q - Vector2(4, 4), q + Vector2(4, 4), Color(1, 0.3, 0.3), 2.0)
+			cv.draw_line(q - Vector2(4, -4), q + Vector2(4, -4), Color(1, 0.3, 0.3), 2.0)
 	var lrel := lz - pos
 	var lcol := Color(0.4, 1.0, 0.5, 0.9 if objective_done else 0.35)
 	if absf(lrel.x) < radius - 0.3 and absf(lrel.y) < radius - 0.3:
-		draw_arc(center + lrel * cs, LZ_RADIUS * cs * (0.8 + 0.2 * mpulse if objective_done else 1.0), 0, TAU, 24, lcol, 2.0)
+		cv.draw_arc(center + lrel * cs, LZ_RADIUS * cs * (0.8 + 0.2 * mpulse if objective_done else 1.0), 0, TAU, 24, lcol, 2.0)
 	elif objective_done:
 		var lv := lrel.normalized()
 		var le := center + lv * (mm.size.x * 0.5 - 10.0)
-		draw_circle(le, 6.0, lcol)
+		cv.draw_circle(le, 6.0, lcol)
 	for cc in caches:
 		if cc["taken"]:
 			continue
 		var crel: Vector2 = cc["pos"] - pos
 		if absf(crel.x) < radius - 0.3 and absf(crel.y) < radius - 0.3:
-			draw_rect(Rect2(center + crel * cs - Vector2(3, 3), Vector2(6, 6)), Color(1.0, 0.85, 0.2))
+			cv.draw_rect(Rect2(center + crel * cs - Vector2(3, 3), Vector2(6, 6)), Color(1.0, 0.85, 0.2))
 	if on_foot:
 		var mrel := mech_pos - pos
 		var mp := center + mrel * cs
 		if absf(mrel.x) < radius - 0.3 and absf(mrel.y) < radius - 0.3:
-			draw_circle(mp, 6.0, Color(0.4, 1.0, 0.6))
-			draw_line(mp, mp + Vector2.from_angle(mech_angle) * 10.0, Color(0.4, 1.0, 0.6), 2.0)
+			cv.draw_circle(mp, 6.0, Color(0.4, 1.0, 0.6))
+			cv.draw_line(mp, mp + Vector2.from_angle(mech_angle) * 10.0, Color(0.4, 1.0, 0.6), 2.0)
 		else:
 			var mv := mrel.normalized()
 			var me := center + mv * (mm.size.x * 0.5 - 8.0)
-			draw_circle(me, 6.0, Color(0.4, 1.0, 0.6))
+			cv.draw_circle(me, 6.0, Color(0.4, 1.0, 0.6))
 	# Off-screen hive arrows so the player always knows where to go.
 	for a in aliens:
 		if a["dead"] or not _is_nest(a):
@@ -3772,13 +4068,13 @@ func _draw_minimap(w: float) -> void:
 			continue
 		var v := rel2.normalized()
 		var edge := center + v * (mm.size.x * 0.5 - 8.0)
-		draw_colored_polygon(PackedVector2Array([edge + v * 7.0, edge - v * 5.0 + v.orthogonal() * 6.0, edge - v * 5.0 - v.orthogonal() * 6.0]), Color(0.9, 0.3, 1.0))
+		cv.draw_colored_polygon(PackedVector2Array([edge + v * 7.0, edge - v * 5.0 + v.orthogonal() * 6.0, edge - v * 5.0 - v.orthogonal() * 6.0]), Color(0.9, 0.3, 1.0))
 	var fwd := Vector2.from_angle(angle)
 	var fov := atan(FOV_PLANE)
-	draw_line(center, center + fwd.rotated(-fov) * 40.0, Color(0.4, 1.0, 0.6, 0.35), 1.0)
-	draw_line(center, center + fwd.rotated(fov) * 40.0, Color(0.4, 1.0, 0.6, 0.35), 1.0)
-	draw_colored_polygon(PackedVector2Array([center + fwd * 10.0, center + fwd.rotated(2.4) * 7.0, center + fwd.rotated(-2.4) * 7.0]), Color(0.4, 1.0, 0.6))
-	draw_rect(mm, Color(0.2, 0.5, 0.3), false, 2.0)
+	cv.draw_line(center, center + fwd.rotated(-fov) * 40.0, Color(0.4, 1.0, 0.6, 0.35), 1.0)
+	cv.draw_line(center, center + fwd.rotated(fov) * 40.0, Color(0.4, 1.0, 0.6, 0.35), 1.0)
+	cv.draw_colored_polygon(PackedVector2Array([center + fwd * 10.0, center + fwd.rotated(2.4) * 7.0, center + fwd.rotated(-2.4) * 7.0]), Color(0.4, 1.0, 0.6))
+	cv.draw_rect(mm, Color(0.2, 0.5, 0.3), false, 2.0)
 	# Altitude readout under the minimap.
 	_text("ELEV %+.1f" % floor_z, Vector2(mm.get_center().x, mm.end.y + 20.0), 15, Color(0.4, 1.0, 0.6, 0.8))
 	if not survival:
@@ -3789,36 +4085,36 @@ func _draw_minimap(w: float) -> void:
 
 func _draw_touch_controls(w: float, h: float) -> void:
 	if move_touch >= 0:
-		draw_arc(move_origin, JOY_RADIUS, 0, TAU, 40, Color(1, 1, 1, 0.3), 3.0)
-		draw_circle(move_origin + move_vec * JOY_RADIUS, 34.0, Color(1, 1, 1, 0.25))
+		cv.draw_arc(move_origin, JOY_RADIUS, 0, TAU, 40, Color(1, 1, 1, 0.3), 3.0)
+		cv.draw_circle(move_origin + move_vec * JOY_RADIUS, 34.0, Color(1, 1, 1, 0.25))
 	else:
 		var hint := Vector2(170, h - 175)
-		draw_arc(hint, JOY_RADIUS, 0, TAU, 40, Color(1, 1, 1, 0.12), 2.0)
+		cv.draw_arc(hint, JOY_RADIUS, 0, TAU, 40, Color(1, 1, 1, 0.12), 2.0)
 		_text("MOVE", hint + Vector2(0, 7), 18, Color(1, 1, 1, 0.25))
 
 	var fc := _fire_center(Vector2(w, h))
-	draw_circle(fc, FIRE_R, Color(0.9, 0.15, 0.1, 0.55 if fire_touch >= 0 else 0.3))
-	draw_arc(fc, FIRE_R, 0, TAU, 48, Color(1, 0.5, 0.4, 0.8), 3.0)
+	cv.draw_circle(fc, FIRE_R, Color(0.9, 0.15, 0.1, 0.55 if fire_touch >= 0 else 0.3))
+	cv.draw_arc(fc, FIRE_R, 0, TAU, 48, Color(1, 0.5, 0.4, 0.8), 3.0)
 	_text("FIRE", fc + Vector2(0, 9), 26, Color(1, 1, 1, 0.85))
 
 	if climb_t > 0.0:
 		return
 	if on_foot:
 		var jc := _rocket_center(Vector2(w, h))
-		draw_circle(jc, ROCKET_R, Color(0.3, 0.7, 1.0, 0.35 if jump_z <= 0.0 else 0.15))
-		draw_arc(jc, ROCKET_R, 0, TAU, 40, Color(0.6, 0.85, 1.0, 0.9), 3.0)
+		cv.draw_circle(jc, ROCKET_R, Color(0.3, 0.7, 1.0, 0.35 if jump_z <= 0.0 else 0.15))
+		cv.draw_arc(jc, ROCKET_R, 0, TAU, 40, Color(0.6, 0.85, 1.0, 0.9), 3.0)
 		_text("JUMP", jc + Vector2(0, 7), 20, Color(1, 1, 1, 0.85))
 		return
 	var rc := _rocket_center(Vector2(w, h))
 	var rk_ready := clampf(1.0 - rocket_cd / GameState.rocket_cooldown(), 0.0, 1.0)
-	draw_circle(rc, ROCKET_R, Color(1.0, 0.55, 0.1, 0.4 if rk_ready >= 1.0 else 0.15))
-	draw_arc(rc, ROCKET_R, -PI * 0.5, -PI * 0.5 + TAU * rk_ready, 40, Color(1, 0.75, 0.3, 0.9), 4.0)
+	cv.draw_circle(rc, ROCKET_R, Color(1.0, 0.55, 0.1, 0.4 if rk_ready >= 1.0 else 0.15))
+	cv.draw_arc(rc, ROCKET_R, -PI * 0.5, -PI * 0.5 + TAU * rk_ready, 40, Color(1, 0.75, 0.3, 0.9), 4.0)
 	_text("RKT", rc + Vector2(0, 7), 20, Color(1, 1, 1, 0.85 if rk_ready >= 1.0 else 0.4))
 
 
 func _draw_end_screen(w: float, h: float) -> void:
 	var k := clampf(end_time / 0.8, 0.0, 1.0)
-	draw_rect(Rect2(0, 0, w, h), Color(0, 0, 0, 0.65 * k))
+	cv.draw_rect(Rect2(0, 0, w, h), Color(0, 0, 0, 0.65 * k))
 	if survival:
 		_draw_survival_end(w, h, k)
 		return

@@ -4,7 +4,7 @@ extends RefCounted
 
 const THEMES := [
 	{
-		"id": "coast_dawn", "name": "Coastal Ruins · Dawn", "layout": "ruins", "weather": "none",
+		"id": "coast_dawn", "sun_az": 0.6, "sun_el": 0.14, "sun_col": Color(1.05, 0.72, 0.5), "ambient": Color(0.5, 0.44, 0.52), "ground_tex": "gravel", "ruin_tex": "concrete", "cloud_col": Color(0.95, 0.6, 0.5), "cloud_amount": 0.75, "grade": Color(1.05, 0.98, 0.94), "name": "Coastal Ruins · Dawn", "layout": "ruins", "weather": "none",
 		"sky_top": Color(0.04, 0.02, 0.09), "sky_horizon": Color(0.5, 0.2, 0.16), "stars": 1.0, "planet": true,
 		"ridge_far": Color(0.24, 0.1, 0.13), "ridge_near": Color(0.15, 0.06, 0.09), "fog": Color(0.24, 0.12, 0.13),
 		"ground_far": Color(0.26, 0.14, 0.12), "ground_near": Color(0.13, 0.09, 0.08), "ground_top": Color(0.27, 0.15, 0.13),
@@ -13,7 +13,7 @@ const THEMES := [
 		"tint": Color(1, 1, 1), "props": ["rock", "rock", "crystal", "barrel"], "prop_density": 1.0,
 	},
 	{
-		"id": "rain_city", "name": "Drowned City · Night Rain", "layout": "town", "weather": "rain",
+		"id": "rain_city", "sun_az": 2.2, "sun_el": 0.7, "sun_col": Color(0.28, 0.32, 0.45), "ambient": Color(0.42, 0.45, 0.6), "ground_tex": "asphalt", "ruin_tex": "concrete", "cloud_col": Color(0.16, 0.18, 0.26), "cloud_amount": 1.0, "night": true, "grade": Color(0.92, 0.98, 1.08), "name": "Drowned City · Night Rain", "layout": "town", "weather": "rain",
 		"sky_top": Color(0.01, 0.02, 0.05), "sky_horizon": Color(0.1, 0.13, 0.22), "stars": 0.2, "planet": true,
 		"ridge_far": Color(0.07, 0.08, 0.13), "ridge_near": Color(0.04, 0.05, 0.08), "fog": Color(0.07, 0.09, 0.15),
 		"ground_far": Color(0.12, 0.13, 0.17), "ground_near": Color(0.06, 0.06, 0.08), "ground_top": Color(0.14, 0.15, 0.19),
@@ -22,7 +22,7 @@ const THEMES := [
 		"tint": Color(0.72, 0.78, 0.98), "props": ["car", "car", "barrel", "rock"], "prop_density": 1.2,
 	},
 	{
-		"id": "quarry_noon", "name": "Sunlit Quarry · Noon", "layout": "quarry", "weather": "dust",
+		"id": "quarry_noon", "sun_az": 1.9, "sun_el": 1.05, "sun_col": Color(1.0, 0.95, 0.82), "ambient": Color(0.62, 0.66, 0.75), "ground_tex": "dust", "ruin_tex": "concrete", "cloud_col": Color(1.0, 1.0, 1.0), "cloud_amount": 0.55, "grade": Color(1.04, 1.0, 0.94), "name": "Sunlit Quarry · Noon", "layout": "quarry", "weather": "dust",
 		"sky_top": Color(0.22, 0.42, 0.78), "sky_horizon": Color(0.78, 0.84, 0.9), "stars": 0.0, "planet": true,
 		"ridge_far": Color(0.62, 0.55, 0.5), "ridge_near": Color(0.55, 0.45, 0.36), "fog": Color(0.72, 0.7, 0.64),
 		"ground_far": Color(0.68, 0.54, 0.38), "ground_near": Color(0.5, 0.38, 0.25), "ground_top": Color(0.66, 0.52, 0.36),
@@ -31,7 +31,7 @@ const THEMES := [
 		"tint": Color(1.05, 1.0, 0.94), "props": ["rock", "rock", "barrel", "car"], "prop_density": 1.0,
 	},
 	{
-		"id": "snow_village", "name": "Snowbound Village · Overcast", "layout": "village", "weather": "snow",
+		"id": "snow_village", "sun_az": 3.6, "sun_el": 0.35, "sun_col": Color(0.42, 0.42, 0.46), "ambient": Color(0.85, 0.87, 0.93), "ground_tex": "snow", "ruin_tex": "brick", "cloud_col": Color(0.8, 0.82, 0.86), "cloud_amount": 1.0, "grade": Color(0.96, 1.0, 1.06), "name": "Snowbound Village · Overcast", "layout": "village", "weather": "snow",
 		"sky_top": Color(0.5, 0.55, 0.64), "sky_horizon": Color(0.86, 0.88, 0.92), "stars": 0.0, "planet": false,
 		"ridge_far": Color(0.7, 0.73, 0.78), "ridge_near": Color(0.58, 0.62, 0.68), "fog": Color(0.82, 0.84, 0.88),
 		"ground_far": Color(0.88, 0.9, 0.94), "ground_near": Color(0.72, 0.75, 0.8), "ground_top": Color(0.9, 0.92, 0.96),
@@ -40,7 +40,7 @@ const THEMES := [
 		"tint": Color(0.95, 0.98, 1.06), "props": ["pine", "pine", "pine", "rock"], "prop_density": 1.6,
 	},
 	{
-		"id": "bog_forest", "name": "Bog Forest · Dusk Mist", "layout": "forest", "weather": "fireflies",
+		"id": "bog_forest", "sun_az": 5.5, "sun_el": 0.1, "sun_col": Color(1.0, 0.6, 0.38), "ambient": Color(0.42, 0.42, 0.46), "ground_tex": "grass", "ruin_tex": "brick", "cloud_col": Color(0.85, 0.5, 0.42), "cloud_amount": 0.7, "grade": Color(1.04, 0.98, 0.92), "name": "Bog Forest · Dusk Mist", "layout": "forest", "weather": "fireflies",
 		"sky_top": Color(0.12, 0.08, 0.22), "sky_horizon": Color(0.85, 0.45, 0.3), "stars": 0.5, "planet": true,
 		"ridge_far": Color(0.2, 0.18, 0.2), "ridge_near": Color(0.1, 0.13, 0.08), "fog": Color(0.32, 0.3, 0.3),
 		"ground_far": Color(0.2, 0.26, 0.13), "ground_near": Color(0.08, 0.12, 0.06), "ground_top": Color(0.22, 0.28, 0.14),
@@ -49,7 +49,7 @@ const THEMES := [
 		"tint": Color(0.98, 0.9, 0.85), "props": ["tree", "tree", "pine", "pine", "rock"], "prop_density": 2.6,
 	},
 	{
-		"id": "docks_smog", "name": "Industrial Docks · Smog", "layout": "industrial", "weather": "ash",
+		"id": "docks_smog", "sun_az": 4.3, "sun_el": 0.45, "sun_col": Color(0.9, 0.78, 0.5), "ambient": Color(0.55, 0.53, 0.46), "ground_tex": "slabs", "ruin_tex": "concrete", "cloud_col": Color(0.6, 0.57, 0.38), "cloud_amount": 0.95, "grade": Color(1.04, 1.0, 0.86), "name": "Industrial Docks · Smog", "layout": "industrial", "weather": "ash",
 		"sky_top": Color(0.3, 0.33, 0.18), "sky_horizon": Color(0.72, 0.66, 0.36), "stars": 0.0, "planet": true,
 		"ridge_far": Color(0.4, 0.38, 0.26), "ridge_near": Color(0.26, 0.25, 0.18), "fog": Color(0.5, 0.48, 0.3),
 		"ground_far": Color(0.42, 0.41, 0.38), "ground_near": Color(0.24, 0.24, 0.23), "ground_top": Color(0.42, 0.42, 0.4),
@@ -58,7 +58,7 @@ const THEMES := [
 		"tint": Color(1.0, 0.95, 0.82), "props": ["barrel", "barrel", "car", "rock"], "prop_density": 1.4,
 	},
 	{
-		"id": "infested", "name": "Infested Zone · Alien Night", "layout": "ruins", "weather": "spores",
+		"id": "infested", "sun_az": 0.9, "sun_el": 0.3, "sun_col": Color(0.7, 0.4, 0.85), "ambient": Color(0.42, 0.3, 0.46), "ground_tex": "creep", "ruin_tex": "concrete", "cloud_col": Color(0.4, 0.15, 0.4), "cloud_amount": 0.8, "night": true, "grade": Color(1.02, 0.94, 1.06), "name": "Infested Zone · Alien Night", "layout": "ruins", "weather": "spores",
 		"sky_top": Color(0.07, 0.01, 0.1), "sky_horizon": Color(0.38, 0.08, 0.35), "stars": 0.6, "planet": true,
 		"ridge_far": Color(0.18, 0.04, 0.18), "ridge_near": Color(0.1, 0.02, 0.1), "fog": Color(0.2, 0.05, 0.22),
 		"ground_far": Color(0.22, 0.08, 0.2), "ground_near": Color(0.08, 0.03, 0.08), "ground_top": Color(0.24, 0.1, 0.22),
