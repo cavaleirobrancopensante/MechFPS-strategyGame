@@ -10,4 +10,4 @@ no models, images or audio files.
 - Open the folder in Godot 4.7 and press Play. It starts in the hangar.
 - See [DESIGN.md](DESIGN.md) for the game design, controls and roadmap.
 
-Version: **1.0a**
+Version: **1.1**

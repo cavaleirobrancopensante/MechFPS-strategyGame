@@ -26,6 +26,8 @@ const WALL_COLORS := {
 const PLAYER_R := 0.3
 const KEY_TURN_SPEED := 2.4
 const LOOK_SENS := 0.0065
+const PITCH_SENS := 0.9       ## screen pixels of look per pixel of finger drag
+const PITCH_LIMIT := 0.42     ## max look up/down, as a fraction of screen height
 const JOY_RADIUS := 90.0
 const FIRE_R := 78.0
 const ROCKET_R := 52.0
@@ -88,6 +90,9 @@ var move_origin := Vector2()
 var move_vec := Vector2()
 var look_touch := -1
 var look_last_x := 0.0
+var look_last_y := 0.0
+var pitch := 0.0              ## look up (+) / down (-), in screen pixels
+var horizon_y := 360.0
 var fire_touch := -1
 
 var stars: Array = []
@@ -192,6 +197,9 @@ func _spawn(kind: String, p: Vector2, awake: bool) -> Dictionary:
 func _process(delta: float) -> void:
 	delta = minf(delta, 0.05)
 	time += delta
+	var vh := get_viewport_rect().size.y
+	pitch = clampf(pitch, -vh * PITCH_LIMIT, vh * PITCH_LIMIT)
+	horizon_y = vh * 0.5 + pitch + sin(bob_t * 2.0) * 7.0 * bob_amount
 	if state == State.PLAYING:
 		_update_player(delta)
 		_update_weapons(delta)
@@ -226,6 +234,8 @@ func _update_player(delta: float) -> void:
 	if Input.is_physical_key_pressed(KEY_UP): fwd += 1.0
 	if Input.is_physical_key_pressed(KEY_DOWN): fwd -= 1.0
 	angle = wrapf(angle + turn * KEY_TURN_SPEED * delta, -PI, PI)
+	if Input.is_physical_key_pressed(KEY_PAGEUP) or Input.is_physical_key_pressed(KEY_T): pitch += 420.0 * delta
+	if Input.is_physical_key_pressed(KEY_PAGEDOWN) or Input.is_physical_key_pressed(KEY_G): pitch -= 420.0 * delta
 
 	var dir := Vector2.from_angle(angle)
 	var right := Vector2(-dir.y, dir.x)
@@ -261,7 +271,7 @@ func _update_weapons(delta: float) -> void:
 	for i in 2:
 		muzzle[i] = maxf(0.0, muzzle[i] - delta)
 		recoil[i] = maxf(0.0, recoil[i] - delta * 7.0)
-	locked_target = _find_target(0.0)
+	locked_target = _find_target(Vector2.ZERO)
 	var firing := fire_touch >= 0 or Input.is_physical_key_pressed(KEY_SPACE)
 	if firing and fire_cd <= 0.0:
 		_fire_cannon()
@@ -285,24 +295,26 @@ func _fire_cannon() -> void:
 	shake = maxf(shake, 1.5)
 	Sfx.play("gun", -5.0)
 
-	var spread := rng.randf_range(-0.012, 0.012)
+	# The shot goes exactly where the crosshair points (screen centre),
+	# with a few pixels of random spread.
+	var spread := Vector2(rng.randf_range(-6.0, 6.0), rng.randf_range(-6.0, 6.0))
 	var target = _find_target(spread)
-	var dir := Vector2.from_angle(angle)
-	var right := Vector2(-dir.y, dir.x)
 	var hit_point: Vector2
 	var hit_z := EYE
 	if target != null:
-		var st: Dictionary = target["st"]
 		_damage_alien(target, GameState.cannon_damage())
-		hit_point = target["pos"] - (target["pos"] - pos).normalized() * 0.2
-		hit_z = st["h"] * 0.55
+		var tp: Vector2 = target["pos"]
+		hit_point = tp - (tp - pos).normalized() * 0.2
+		hit_z = _aim_height_at(spread, pos.distance_to(hit_point))
 		explosions.append({"pos": hit_point, "z": hit_z, "t": 0.0, "dur": 0.22, "size": 0.3, "col": Color(0.6, 1.0, 0.3)})
 	else:
-		var col := clampi(int((spread + 1.0) * 0.5 * COLUMNS), 0, COLUMNS - 1)
-		var rd := dir + right * FOV_PLANE * spread
-		hit_point = pos + rd * minf(zbuf[col], MAX_VIEW) * 0.98
-		hit_z = EYE + rng.randf_range(-0.2, 0.2)
-		explosions.append({"pos": hit_point, "z": hit_z, "t": 0.0, "dur": 0.16, "size": 0.22, "col": Color(1.0, 0.8, 0.4)})
+		var impact := _aim_impact(spread)
+		hit_point = impact["pos"]
+		hit_z = impact["z"]
+		if impact["kind"] == "ground":
+			explosions.append({"pos": hit_point, "z": 0.05, "t": 0.0, "dur": 0.25, "size": 0.3, "col": Color(0.6, 0.45, 0.3)})
+		elif impact["kind"] == "wall":
+			explosions.append({"pos": hit_point, "z": hit_z, "t": 0.0, "dur": 0.16, "size": 0.22, "col": Color(1.0, 0.8, 0.4)})
 	tracers.append({"g": g, "pos": hit_point, "z": hit_z, "t": 0.05})
 
 
@@ -311,18 +323,24 @@ func _fire_rocket() -> void:
 		return
 	rocket_cd = GameState.rocket_cooldown()
 	var dir := Vector2.from_angle(angle)
-	if locked_target != null:
-		dir = (locked_target["pos"] - pos).normalized()
-	projectiles.append({"kind": "rocket", "pos": pos + dir * 0.4, "vel": dir * 10.0, "z": 0.75, "life": 3.0})
+	# Climb/dive rate matching the crosshair line: aiming below the horizon dives.
+	var s := get_viewport_rect().size
+	var slope := -(s.y * 0.5 - horizon_y) / (s.x * 0.5 / FOV_PLANE)
+	projectiles.append({"kind": "rocket", "pos": pos + dir * 0.4, "vel": dir * 10.0, "z": EYE + slope * 0.4, "vz": slope * 10.0, "life": 3.0})
 	Sfx.play("rocket", -2.0)
 	shake = maxf(shake, 4.0)
 
 
-func _find_target(spread: float):
+func _aim_point(spread: Vector2) -> Vector2:
+	return get_viewport_rect().size * 0.5 + spread
+
+
+func _find_target(spread: Vector2):
+	## Returns the nearest alien whose sprite is under the crosshair, or null.
 	var s := get_viewport_rect().size
 	var proj_scale := s.x * 0.5 / FOV_PLANE
-	var aim_x := s.x * 0.5 * (1.0 + spread)
-	var col := clampi(int((spread + 1.0) * 0.5 * COLUMNS), 0, COLUMNS - 1)
+	var aim := _aim_point(spread)
+	var col := clampi(int(aim.x / s.x * COLUMNS), 0, COLUMNS - 1)
 	var wall_d := zbuf[col]
 	var best = null
 	var best_d := INF
@@ -330,13 +348,51 @@ func _find_target(spread: float):
 		if a["dead"]:
 			continue
 		var pr := _project(a["pos"])
-		if pr.y <= 0.2 or pr.y > wall_d + 0.4 or pr.y > MAX_VIEW:
+		if pr.y <= 0.2 or pr.y > wall_d or pr.y > MAX_VIEW:
 			continue
-		var half: float = a["st"]["w"] * 0.5 * proj_scale / pr.y * 0.85
-		if absf(pr.x - aim_x) < half + 4.0 and pr.y < best_d:
+		var st: Dictionary = a["st"]
+		var half_w: float = st["w"] * 0.5 * proj_scale / pr.y * 0.8
+		var bottom := horizon_y + EYE * proj_scale / pr.y
+		var top: float = bottom - st["h"] * proj_scale / pr.y * 0.95
+		if absf(pr.x - aim.x) < half_w and aim.y > top and aim.y < bottom and pr.y < best_d:
 			best = a
 			best_d = pr.y
 	return best
+
+
+func _aim_ray(spread: Vector2) -> Vector2:
+	## World direction of the aim point (forward component = 1).
+	var s := get_viewport_rect().size
+	var dir := Vector2.from_angle(angle)
+	var right := Vector2(-dir.y, dir.x)
+	var cam_x := _aim_point(spread).x / s.x * 2.0 - 1.0
+	return dir + right * FOV_PLANE * cam_x
+
+
+func _aim_height_at(spread: Vector2, depth: float) -> float:
+	## Height of the crosshair line at a given forward distance.
+	var s := get_viewport_rect().size
+	var proj_scale := s.x * 0.5 / FOV_PLANE
+	return EYE - (_aim_point(spread).y - horizon_y) * depth / proj_scale
+
+
+func _aim_impact(spread: Vector2) -> Dictionary:
+	## Where a shot that misses every alien lands: ground, wall, or sky.
+	var s := get_viewport_rect().size
+	var proj_scale := s.x * 0.5 / FOV_PLANE
+	var aim := _aim_point(spread)
+	var rd := _aim_ray(spread)
+	var col := clampi(int(aim.x / s.x * COLUMNS), 0, COLUMNS - 1)
+	var wall_d := minf(zbuf[col], MAX_VIEW)
+	var below := aim.y - horizon_y
+	if below > 0.5:
+		var ground_d := EYE * proj_scale / below
+		if ground_d < wall_d:
+			return {"kind": "ground", "pos": pos + rd * ground_d, "z": 0.0}
+	var z := _aim_height_at(spread, wall_d)
+	if z >= 0.0 and z <= WALL_H and zbuf[col] < MAX_VIEW:
+		return {"kind": "wall", "pos": pos + rd * wall_d * 0.98, "z": z}
+	return {"kind": "sky", "pos": pos + rd * MAX_VIEW, "z": _aim_height_at(spread, MAX_VIEW)}
 
 
 func _project(world: Vector2) -> Vector2:
@@ -544,13 +600,15 @@ func _update_projectiles(delta: float) -> void:
 		if pr["kind"] == "rocket":
 			if puff:
 				explosions.append({"pos": pr["pos"], "z": pr["z"], "t": 0.0, "dur": 0.5, "size": 0.18, "col": Color(0.55, 0.52, 0.5), "smoke": true})
-			var hit: bool = map.is_wall_at(np) or pr["life"] <= 0.0
+			pr["z"] += pr["vz"] * delta
+			var rz: float = pr["z"]
+			var hit: bool = (map.is_wall_at(np) and rz < WALL_H) or rz <= 0.05 or pr["life"] <= 0.0
 			for a in aliens:
-				if not a["dead"] and a["pos"].distance_to(np) < a["st"]["r"] + 0.3:
+				if not a["dead"] and a["pos"].distance_to(np) < a["st"]["r"] + 0.3 and rz < a["st"]["h"] + 0.2:
 					hit = true
 					break
 			if hit:
-				_explode_rocket(pr["pos"])
+				_explode_rocket(pr["pos"], maxf(rz, 0.1))
 				pr["life"] = -1.0
 				continue
 		else:
@@ -566,8 +624,8 @@ func _update_projectiles(delta: float) -> void:
 	projectiles = projectiles.filter(func(pr): return pr["life"] > 0.0)
 
 
-func _explode_rocket(p: Vector2) -> void:
-	explosions.append({"pos": p, "z": 0.7, "t": 0.0, "dur": 0.75, "size": 1.4, "col": Color(1.0, 0.6, 0.2)})
+func _explode_rocket(p: Vector2, z: float) -> void:
+	explosions.append({"pos": p, "z": z, "t": 0.0, "dur": 0.75, "size": 1.4, "col": Color(1.0, 0.6, 0.2)})
 	for i in 3:
 		var off := Vector2(rng.randf_range(-0.5, 0.5), rng.randf_range(-0.5, 0.5))
 		explosions.append({"pos": p + off, "z": rng.randf_range(0.3, 1.2), "t": -0.06 * (i + 1), "dur": 0.6, "size": 0.9, "col": Color(1.0, 0.75, 0.3)})
@@ -578,7 +636,7 @@ func _explode_rocket(p: Vector2) -> void:
 		if a["dead"]:
 			continue
 		var dd: float = a["pos"].distance_to(p)
-		if dd < 1.9:
+		if dd < 1.9 and z < a["st"]["h"] + 1.2:
 			_damage_alien(a, GameState.rocket_damage() * (1.0 - dd / 1.9 * 0.6))
 
 
@@ -678,6 +736,7 @@ func _input(event: InputEvent) -> void:
 			elif look_touch < 0:
 				look_touch = event.index
 				look_last_x = p.x
+				look_last_y = p.y
 		else:
 			if event.index == move_touch:
 				move_touch = -1
@@ -692,10 +751,13 @@ func _input(event: InputEvent) -> void:
 			move_vec = v.limit_length(1.0) if v.length() > 0.12 else Vector2.ZERO
 		elif event.index == look_touch:
 			angle = wrapf(angle + (event.position.x - look_last_x) * LOOK_SENS, -PI, PI)
+			pitch -= (event.position.y - look_last_y) * PITCH_SENS
 			look_last_x = event.position.x
+			look_last_y = event.position.y
 		elif event.index == fire_touch:
 			# Sliding your thumb on the fire button also turns the mech.
 			angle = wrapf(angle + event.relative.x * LOOK_SENS * 0.7, -PI, PI)
+			pitch -= event.relative.y * PITCH_SENS * 0.7
 
 
 func _fire_center(s: Vector2) -> Vector2:
@@ -722,7 +784,7 @@ func _draw() -> void:
 	draw_set_transform(shake_off)
 
 	var proj_scale := w * 0.5 / FOV_PLANE
-	var horizon := h * 0.5 + sin(bob_t * 2.0) * 7.0 * bob_amount
+	var horizon := horizon_y
 	_draw_sky(w, h, horizon)
 	_draw_ground(w, h, horizon)
 	_draw_walls(w, h, horizon, proj_scale)
@@ -744,22 +806,23 @@ func _sky_x(rel: float, w: float) -> float:
 
 
 func _draw_sky(w: float, h: float, horizon: float) -> void:
+	draw_rect(Rect2(-40, -40, w + 80, horizon - h * 0.55 + 41), Color(0.04, 0.02, 0.09))
 	draw_polygon(
-		PackedVector2Array([Vector2(-40, -40), Vector2(w + 40, -40), Vector2(w + 40, horizon), Vector2(-40, horizon)]),
+		PackedVector2Array([Vector2(-40, horizon - h * 0.55), Vector2(w + 40, horizon - h * 0.55), Vector2(w + 40, horizon), Vector2(-40, horizon)]),
 		PackedColorArray([Color(0.04, 0.02, 0.09), Color(0.04, 0.02, 0.09), Color(0.5, 0.2, 0.16), Color(0.5, 0.2, 0.16)]))
 	var half_fov := atan(FOV_PLANE) + 0.05
 	for st in stars:
 		var rel := wrapf(st["a"] - angle, -PI, PI)
 		if absf(rel) > half_fov:
 			continue
-		var y: float = horizon * (1.0 - st["e"]) * 0.9
+		var y: float = horizon - st["e"] * h * 0.45
 		var b: float = st["b"] * (0.6 + 0.4 * sin(time * 2.0 + st["a"] * 9.0))
-		draw_rect(Rect2(_sky_x(rel, w), y, 2, 2), Color(1, 0.95, 0.9, b * clampf(1.0 - y / horizon, 0.0, 1.0) * 1.3))
+		draw_rect(Rect2(_sky_x(rel, w), y, 2, 2), Color(1, 0.95, 0.9, b * clampf((horizon - y) / (h * 0.45), 0.0, 1.0) * 1.3))
 
 	# Ringed gas giant hanging over the battlefield.
 	var prel := wrapf(0.9 - angle, -PI, PI)
 	if absf(prel) < half_fov + 0.3:
-		var c := Vector2(_sky_x(prel, w), horizon * 0.38)
+		var c := Vector2(_sky_x(prel, w), horizon - h * 0.31)
 		var r := 64.0
 		var ring: Array[Vector2] = []
 		for i in 49:
@@ -1071,7 +1134,10 @@ func _text(t: String, center: Vector2, size: int, c: Color) -> void:
 func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	var hud := Color(0.4, 1.0, 0.6)
 	var locked := locked_target != null
-	var cc := Vector2(w * 0.5, horizon)
+	var cc := Vector2(w * 0.5, h * 0.5)
+	# Horizon ticks so you can tell how far up or down you're looking.
+	for sgn in [-1.0, 1.0]:
+		draw_line(Vector2(w * 0.5 + sgn * 70.0, horizon), Vector2(w * 0.5 + sgn * 120.0, horizon), Color(0.4, 1.0, 0.6, 0.45), 2.0)
 	var ch_col := Color(1.0, 0.3, 0.2) if locked else hud
 	draw_arc(cc, 22.0, 0, TAU, 32, ch_col, 2.0)
 	for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
