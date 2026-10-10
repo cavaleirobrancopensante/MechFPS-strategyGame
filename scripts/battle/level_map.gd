@@ -8,6 +8,7 @@ enum { EMPTY, RUIN, METAL, ORGANIC, PLATFORM }
 
 const STEP := 0.6        ## highest ledge a walker can climb onto
 const BORDER_H := 5.0
+const MECH_R := 0.55     ## the mech is too wide for one-square gaps
 
 var w := 32
 var h := 32
@@ -19,6 +20,9 @@ var start := Vector2(2.5, 2.5)
 var hive_cells: Array[Vector2i] = []
 var nest_cells: Array[Vector2i] = []  ## where dormant aliens wait at mission start
 var prop_spots: Array[Vector2] = []   ## decorative rubble on the ground
+var cache_spots: Array[Vector2] = []  ## salvage caches only the pilot can reach
+var mech_cells := PackedByteArray()   ## 1 where the mech can stand
+var bunker_interiors: Array[Rect2i] = []
 var rng := RandomNumberGenerator.new()
 var _reserved := PackedByteArray()    ## cells that buildings must not overwrite
 
@@ -99,6 +103,41 @@ func generate(seed_value: int, hive_count: int) -> void:
 			_reserve(cell.x, cell.y)
 			cell += dir
 
+	# 4b. Bunkers: hollow buildings with a one-square door. Too narrow for
+	# the mech, so only the pilot can get inside on foot.
+	bunker_interiors.clear()
+	for i in 25:
+		if bunker_interiors.size() >= 3:
+			break
+		var bw := rng.randi_range(4, 5)
+		var bh := rng.randi_range(4, 5)
+		var bx := rng.randi_range(3, w - 4 - bw)
+		var by := rng.randi_range(3, h - 4 - bh)
+		if _rect_reserved(bx - 2, by - 2, bw + 4, bh + 4):
+			continue
+		var floor_h := 9.0
+		for yy in range(-2, bh + 2):
+			for xx in range(-2, bw + 2):
+				floor_h = minf(floor_h, terrain[idx(bx + xx, by + yy)])
+		# Flatten the bunker and a ring around it so the door is always walkable.
+		for yy in range(-2, bh + 2):
+			for xx in range(-2, bw + 2):
+				_flatten(bx + xx, by + yy, floor_h)
+				_reserve(bx + xx, by + yy)
+		var wall_kind := METAL if i % 2 == 0 else RUIN
+		for yy in bh:
+			for xx in bw:
+				if xx == 0 or yy == 0 or xx == bw - 1 or yy == bh - 1:
+					_set_cell(bx + xx, by + yy, wall_kind, floor_h + 2.6)
+		var door: Vector2i
+		match rng.randi_range(0, 3):
+			0: door = Vector2i(bx + bw / 2, by)
+			1: door = Vector2i(bx + bw / 2, by + bh - 1)
+			2: door = Vector2i(bx, by + bh / 2)
+			_: door = Vector2i(bx + bw - 1, by + bh / 2)
+		_set_cell(door.x, door.y, EMPTY, floor_h)
+		bunker_interiors.append(Rect2i(bx + 1, by + 1, bw - 2, bh - 2))
+
 	# 5. Tall ruined buildings of varied height.
 	for i in 30:
 		var bw := rng.randi_range(1, 4)
@@ -149,7 +188,8 @@ func generate(seed_value: int, hive_count: int) -> void:
 	var dist := distance_field(sc, true)
 	_seal_unreachable(dist, RUIN, 3.0)
 
-	# 9. Hives, with alien growth around them.
+	# 9. Hives (always somewhere the mech can reach), with alien growth.
+	compute_mech_reach(start)
 	_place_hives(dist, hive_count)
 	for hc in hive_cells:
 		for yy in range(hc.y - 2, hc.y + 3):
@@ -162,12 +202,11 @@ func generate(seed_value: int, hive_count: int) -> void:
 				elif k == EMPTY and rng.randf() < 0.12:
 					_set_cell(xx, yy, ORGANIC, terrain[idx(xx, yy)] + 2.0)
 		_set_cell(hc.x, hc.y, EMPTY, terrain[idx(hc.x, hc.y)])
-	dist = distance_field(sc, true)
-	for hc in hive_cells:
-		if dist[idx(hc.x, hc.y)] < 0:
-			_carve_to_open(hc, sc)
+	_ensure_mech_access(sc)
 	dist = distance_field(sc, true)
 	_seal_unreachable(dist, ORGANIC, 2.0)
+	compute_mech_reach(start)
+	_place_caches(dist)
 
 	# 10. Alien nests and rubble.
 	nest_cells.clear()
@@ -195,7 +234,7 @@ func _place_hives(dist: PackedInt32Array, count: int) -> void:
 	for y in range(2, h - 2):
 		for x in range(2, w - 2):
 			var i := idx(x, y)
-			if kinds[i] == EMPTY and dist[i] >= 14 and heights[i] >= 0.0 and heights[i] <= 0.75:
+			if kinds[i] == EMPTY and dist[i] >= 14 and heights[i] >= 0.0 and heights[i] <= 0.75 and mech_cells[i]:
 				candidates.append(Vector2i(x, y))
 	_shuffle(candidates)
 	var min_spacing := 8.0
@@ -216,11 +255,114 @@ func _place_hives(dist: PackedInt32Array, count: int) -> void:
 		_set_cell(w - 4, h - 4, EMPTY, terrain[idx(w - 4, h - 4)])
 
 
+func compute_mech_reach(from: Vector2) -> void:
+	## Marks every cell the mech can stand in, by flood-filling a half-square
+	## grid of test points with the mech's full width.
+	var pw := w * 2
+	var phh := h * 2
+	var ok := PackedByteArray()
+	ok.resize(pw * phh)
+	var ph := PackedFloat32Array()
+	ph.resize(pw * phh)
+	for j in phh:
+		for i in pw:
+			var p := Vector2((i + 0.5) * 0.5, (j + 0.5) * 0.5)
+			var fh := height_at(p)
+			ph[j * pw + i] = fh
+			ok[j * pw + i] = 0 if blocked(p, MECH_R, fh) else 1
+	mech_cells.resize(w * h)
+	mech_cells.fill(0)
+	var si := int(from.y * 2.0) * pw + int(from.x * 2.0)
+	if ok[si] == 0:
+		return
+	var seen := PackedByteArray()
+	seen.resize(pw * phh)
+	var queue := PackedInt32Array([si])
+	seen[si] = 1
+	var head := 0
+	while head < queue.size():
+		var pi := queue[head]
+		head += 1
+		var px := pi % pw
+		var py := pi / pw
+		mech_cells[idx(px / 2, py / 2)] = 1
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var nx: int = px + d.x
+			var ny: int = py + d.y
+			if nx < 0 or ny < 0 or nx >= pw or ny >= phh:
+				continue
+			var ni := ny * pw + nx
+			if seen[ni] or not ok[ni] or absf(ph[ni] - ph[pi]) > STEP:
+				continue
+			seen[ni] = 1
+			queue.append(ni)
+
+
+func _place_caches(dist: PackedInt32Array) -> void:
+	## Salvage caches go where the pilot can walk but the mech can't fit:
+	## one inside each bunker, plus a few in other tight spots.
+	cache_spots.clear()
+	for r in bunker_interiors:
+		var c := r.position + r.size / 2
+		if dist[idx(c.x, c.y)] >= 0 and not mech_cells[idx(c.x, c.y)]:
+			cache_spots.append(Vector2(c) + Vector2(0.5, 0.5))
+	var extra: Array[Vector2i] = []
+	for y in range(1, h - 1):
+		for x in range(1, w - 1):
+			var i := idx(x, y)
+			if kinds[i] == EMPTY and dist[i] >= 6 and not mech_cells[i]:
+				extra.append(Vector2i(x, y))
+	_shuffle(extra)
+	for c in extra:
+		if cache_spots.size() >= 4:
+			break
+		var p := Vector2(c) + Vector2(0.5, 0.5)
+		var far_enough := true
+		for q in cache_spots:
+			if q.distance_to(p) < 6.0:
+				far_enough = false
+				break
+		if far_enough:
+			cache_spots.append(p)
+
+
 func _seal_unreachable(dist: PackedInt32Array, kind: int, extra: float) -> void:
 	for i in w * h:
 		if dist[i] < 0 and (kinds[i] == EMPTY or kinds[i] == PLATFORM):
 			kinds[i] = kind
 			heights[i] = maxf(terrain[i], 0.0) + extra
+
+
+func _ensure_mech_access(sc: Vector2i) -> void:
+	## Opens wide corridors until every hive and most of the open ground can
+	## be reached by the mech. One-square nooks are left alone on purpose.
+	for attempt in 12:
+		compute_mech_reach(start)
+		var dist := distance_field(sc, true)
+		var target := Vector2i(-1, -1)
+		for hc in hive_cells:
+			if dist[idx(hc.x, hc.y)] < 0 or not mech_cells[idx(hc.x, hc.y)]:
+				target = hc
+				break
+		if target.x < 0:
+			var open := 0
+			var reach := 0
+			var cands: Array[Vector2i] = []
+			for y in range(1, h - 1):
+				for x in range(1, w - 1):
+					var i := idx(x, y)
+					if dist[i] < 0:
+						continue
+					open += 1
+					if mech_cells[i]:
+						reach += 1
+					elif not blocked(Vector2(x + 0.5, y + 0.5), MECH_R, heights[i]):
+						# Roomy enough for the mech, just cut off.
+						cands.append(Vector2i(x, y))
+			if reach >= open * 0.85 or cands.is_empty():
+				return
+			target = cands[rng.randi_range(0, cands.size() - 1)]
+		_carve_to_open(target, sc)
 
 
 func _carve_to_open(from: Vector2i, toward: Vector2i) -> void:
@@ -231,10 +373,15 @@ func _carve_to_open(from: Vector2i, toward: Vector2i) -> void:
 		var dy := toward.y - p.y
 		if dx == 0 and dy == 0:
 			break
-		p += Vector2i(signi(dx), 0) if abs(dx) > abs(dy) else Vector2i(0, signi(dy))
+		var step := Vector2i(signi(dx), 0) if abs(dx) > abs(dy) else Vector2i(0, signi(dy))
+		p += step
 		if not _inner(p.x, p.y):
 			break
-		_set_cell(p.x, p.y, EMPTY, terrain[idx(p.x, p.y)])
+		# Three squares wide so the mech fits through, even at corners.
+		var side := Vector2i(step.y, step.x)
+		for q in [p - side, p, p + side]:
+			if _inner(q.x, q.y) and (kinds[idx(q.x, q.y)] != EMPTY or heights[idx(q.x, q.y)] != terrain[idx(q.x, q.y)]):
+				_set_cell(q.x, q.y, EMPTY, terrain[idx(q.x, q.y)])
 
 
 func _shuffle(arr: Array) -> void:
@@ -305,11 +452,20 @@ func is_solid(x: int, y: int) -> bool:
 	return k == RUIN or k == METAL or k == ORGANIC
 
 
-func blocked(p: Vector2, r: float, floor_h: float) -> bool:
-	## A walker standing at floor_h can't move to p if any corner is too high.
-	var limit := floor_h + STEP
-	return height_at(p + Vector2(-r, -r)) > limit or height_at(p + Vector2(r, -r)) > limit \
-		or height_at(p + Vector2(-r, r)) > limit or height_at(p + Vector2(r, r)) > limit
+func blocked(p: Vector2, r: float, floor_h: float, step := STEP) -> bool:
+	## A walker standing at floor_h can't move to p if any part of its
+	## footprint is too high to step onto.
+	var limit := floor_h + step
+	if height_at(p + Vector2(-r, -r)) > limit or height_at(p + Vector2(r, -r)) > limit \
+		or height_at(p + Vector2(-r, r)) > limit or height_at(p + Vector2(r, r)) > limit:
+		return true
+	if r > 0.45:
+		# Wide bodies: also test edge midpoints and centre so a one-square
+		# pillar can't slip between the corners.
+		return height_at(p) > limit or height_at(p + Vector2(r, 0)) > limit \
+			or height_at(p + Vector2(-r, 0)) > limit or height_at(p + Vector2(0, r)) > limit \
+			or height_at(p + Vector2(0, -r)) > limit
+	return false
 
 
 func line_of_sight(a: Vector2, za: float, b: Vector2, zb: float) -> bool:
