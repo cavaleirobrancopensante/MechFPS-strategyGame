@@ -24,6 +24,20 @@ static func build_all() -> Dictionary:
 	out["flyer"] = _view_set(1.5, 64, 4, func(ph): return _flyer(ph))
 	out["burrower"] = _view_set(2.0, 96, 4, func(ph): return _burrower(ph))
 	out["mound"] = _view_set(1.3, 48, 2, func(ph): return _mound(ph))
+	# Carcasses: insects end up on their backs, the big ones on their sides,
+	# hives slump.
+	out["crawler_dead"] = _view_set(1.0, 64, 1, func(ph): return _dead(_crawler(0.25), PI))
+	out["spitter_dead"] = _view_set(1.25, 64, 1, func(ph): return _dead(_spitter(0.0), PI * 0.5))
+	out["brute_dead"] = _view_set(1.95, 96, 1, func(ph): return _dead(_brute(0.25), PI * 0.5))
+	out["flyer_dead"] = _view_set(1.5, 64, 1, func(ph): return _dead(_flyer(0.5), PI))
+	out["burrower_dead"] = _view_set(2.0, 96, 1, func(ph): return _dead(_burrower(0.25), PI))
+	out["hive_dead"] = _view_set(2.2, 96, 1, func(ph): return _slump(_hive(0.0, 1.0, Color(0.42, 0.14, 0.32))))
+	out["mother_dead"] = _view_set(3.9, 128, 1, func(ph): return _slump(_hive(0.0, 1.75, Color(0.5, 0.12, 0.2))))
+	out["chest"] = _view_set(2.2, 80, 4, func(ph): return _chest(ph, true))
+	out["chest_nosuit"] = _view_set(2.2, 80, 4, func(ph): return _chest(ph, false))
+	out["pile_scrap"] = _view_set(0.8, 40, 1, func(ph): return _scrap_pile())
+	out["pile_circuits"] = _view_set(0.7, 40, 1, func(ph): return _circuit_bundle())
+	out["jar_biomass"] = _view_set(0.6, 40, 2, func(ph): return _biomass_jar(ph))
 	out["hive"] = _view_set(2.2, 96, 2, func(ph): return _hive(ph, 1.0, Color(0.48, 0.14, 0.36)))
 	out["mother"] = _view_set(3.9, 128, 2, func(ph): return _hive(ph, 1.75, Color(0.55, 0.12, 0.2)))
 	out["survivor"] = _view_set(0.9, 48, 2, func(ph): return _survivor(ph))
@@ -318,6 +332,124 @@ static func _mound(ph: float) -> Array:
 		var r := 0.3 + 0.15 * float(k % 2)
 		parts.append(_ell(Vector3(cos(a) * r, 0.1 + 0.06 * sin(ph * TAU + k), sin(a) * r), Vector3(0.08, 0.06, 0.07), dirt.darkened(0.2) if k % 2 == 0 else Color(0.45, 0.42, 0.4), Vector3(0, a, 0)))
 	return parts
+
+
+static func _part_bounds(parts: Array) -> AABB:
+	var lo := Vector3(1e9, 1e9, 1e9)
+	var hi := Vector3(-1e9, -1e9, -1e9)
+	for p: Dictionary in parts:
+		var b: Basis = p["b"]
+		var c: Vector3 = p["c"]
+		var e := Vector3()
+		for k in 3:
+			if p["t"] == 0:
+				e[k] = sqrt(b.x[k] * b.x[k] + b.y[k] * b.y[k] + b.z[k] * b.z[k])
+			else:
+				e[k] = absf(b.x[k]) + absf(b.y[k]) + absf(b.z[k])
+		lo = lo.min(c - e)
+		hi = hi.max(c + e)
+	return AABB(lo, hi - lo)
+
+
+static func _dead(parts: Array, roll: float) -> Array:
+	## Rolls a model over (about its forward axis) and lays it on the ground,
+	## colours dulled.
+	var r := Basis(Vector3.FORWARD, roll)
+	var out: Array = []
+	for p: Dictionary in parts:
+		var q := p.duplicate()
+		q["c"] = r * (p["c"] as Vector3)
+		q["b"] = r * (p["b"] as Basis)
+		var col: Color = p["col"]
+		q["col"] = col.darkened(0.25) if not p["emit"] else Color(0.3, 0.25, 0.2)
+		q["emit"] = false
+		out.append(q)
+	var bb := _part_bounds(out)
+	var shift := Vector3(-(bb.position.x + bb.size.x * 0.5), -bb.position.y - 0.05, 0.0)
+	for q: Dictionary in out:
+		q["c"] = (q["c"] as Vector3) + shift
+	return out
+
+
+static func _slump(parts: Array) -> Array:
+	var out: Array = []
+	for p: Dictionary in parts:
+		var q := p.duplicate()
+		var c: Vector3 = p["c"]
+		q["c"] = Vector3(c.x * 1.15, c.y * 0.4, c.z * 1.15)
+		q["b"] = Basis.from_scale(Vector3(1.15, 0.45, 1.15)) * (p["b"] as Basis)
+		q["col"] = (p["col"] as Color).darkened(0.3)
+		q["emit"] = false
+		out.append(q)
+	return out
+
+
+static func _chest(ph: float, suit: bool) -> Array:
+	## "The Chest": Mags's cargo walker. A big hazard-striped box on four
+	## stubby legs, with harness straps for passengers and the hazmat suit
+	## hanging on its side.
+	var body := Color(0.85, 0.55, 0.15)
+	var dark := Color(0.25, 0.24, 0.24)
+	var sw := sin(ph * TAU)
+	var parts: Array = [
+		_box(Vector3(0, 0.95, 0), Vector3(0.42, 0.32, 0.55), body, 0.0, 0.3),
+		_box(Vector3(0, 1.3, 0), Vector3(0.44, 0.04, 0.57), dark, 0.0, 0.2),
+		_box(Vector3(0, 0.72, 0.56), Vector3(0.3, 0.06, 0.02), Color(0.1, 0.1, 0.1)),
+		_box(Vector3(0, 0.88, 0.57), Vector3(0.12, 0.08, 0.02), Color(0.95, 0.85, 0.2)),
+		_ball(Vector3(-0.25, 1.15, 0.56), 0.05, Color(0.3, 1.0, 0.4), true),
+		_ball(Vector3(0.25, 1.15, 0.56), 0.05, Color(1.0, 0.3, 0.2), true),
+	]
+	for k in 4:
+		parts.append(_box(Vector3(0.43, 0.95, -0.42 + k * 0.28), Vector3(0.01, 0.3, 0.04), Color(0.12, 0.12, 0.12) if k % 2 == 0 else Color(0.95, 0.85, 0.2)))
+	# Harness straps on the roof for passengers.
+	for k in 3:
+		parts.append(_box(Vector3(0, 1.36, -0.35 + k * 0.35), Vector3(0.46, 0.02, 0.03), Color(0.2, 0.35, 0.6)))
+	for sx in [-1.0, 1.0]:
+		for sz in [-1.0, 1.0]:
+			var s: float = sw * sx * sz
+			var hip := Vector3(sx * 0.35, 0.7, sz * 0.4)
+			var knee := Vector3(sx * 0.55, 0.45, sz * 0.5 + s * 0.08)
+			var foot := Vector3(sx * 0.48, 0.03 + maxf(0.0, s) * 0.08, sz * 0.5 + s * 0.15)
+			parts.append(_seg(hip, knee, 0.07, dark))
+			parts.append(_seg(knee, foot, 0.06, dark))
+			parts.append(_ell(foot, Vector3(0.1, 0.04, 0.12), dark.darkened(0.3)))
+	if suit:
+		# The hazmat suit hanging on the left side.
+		var y := Color(0.95, 0.85, 0.15)
+		parts.append(_ell(Vector3(-0.5, 0.95, 0.05), Vector3(0.08, 0.22, 0.14), y, Vector3.ZERO, 0.4))
+		parts.append(_ell(Vector3(-0.51, 1.22, 0.05), Vector3(0.09, 0.09, 0.09), y, Vector3.ZERO, 0.4))
+		parts.append(_ell(Vector3(-0.56, 1.22, 0.05), Vector3(0.03, 0.06, 0.07), Color(0.2, 0.35, 0.4), Vector3.ZERO, 0.9))
+		parts.append(_seg(Vector3(-0.5, 0.75, 0.0), Vector3(-0.5, 0.5, -0.02), 0.05, y))
+		parts.append(_seg(Vector3(-0.5, 0.75, 0.1), Vector3(-0.5, 0.5, 0.12), 0.05, y))
+	return parts
+
+
+static func _scrap_pile() -> Array:
+	var parts: Array = []
+	var cols := [Color(0.55, 0.55, 0.58), Color(0.45, 0.3, 0.2), Color(0.35, 0.37, 0.4), Color(0.6, 0.5, 0.3)]
+	for k in 7:
+		var a := k * 2.1
+		parts.append(_box(Vector3(cos(a) * 0.15, 0.06 + (k % 3) * 0.05, sin(a) * 0.15), Vector3(0.12, 0.03, 0.05), cols[k % 4], a, 0.5))
+	parts.append(_seg(Vector3(-0.2, 0.05, 0.0), Vector3(0.15, 0.25, 0.05), 0.025, Color(0.6, 0.6, 0.62), 0.6))
+	return parts
+
+
+static func _circuit_bundle() -> Array:
+	var parts: Array = []
+	for k in 3:
+		parts.append(_box(Vector3(0, 0.05 + k * 0.06, 0), Vector3(0.18, 0.02, 0.13), Color(0.1, 0.45, 0.2), k * 0.4, 0.4))
+		parts.append(_box(Vector3(0.05, 0.08 + k * 0.06, 0.02), Vector3(0.05, 0.015, 0.04), Color(0.15, 0.15, 0.15), k * 0.4))
+		parts.append(_box(Vector3(-0.08, 0.075 + k * 0.06, -0.04), Vector3(0.02, 0.01, 0.02), Color(0.9, 0.75, 0.3), k * 0.4, 0.8))
+	return parts
+
+
+static func _biomass_jar(ph: float) -> Array:
+	var glow := Color(0.5, 1.0, 0.3).lerp(Color(0.8, 1.0, 0.5), ph)
+	return [
+		_ell(Vector3(0, 0.2, 0), Vector3(0.13, 0.17, 0.13), glow, Vector3.ZERO, 0.0, true),
+		_box(Vector3(0, 0.4, 0), Vector3(0.1, 0.04, 0.1), Color(0.4, 0.42, 0.45), 0.0, 0.6),
+		_box(Vector3(0, 0.03, 0), Vector3(0.12, 0.03, 0.12), Color(0.4, 0.42, 0.45), 0.0, 0.6),
+	]
 
 
 static func _brute(ph: float) -> Array:

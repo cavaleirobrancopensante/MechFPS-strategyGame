@@ -42,6 +42,25 @@ var new_best := false
 var paused := false
 var pause_layer: CanvasLayer
 
+# --- Salvage, harvesting and the Chest -----------------------------------------
+## Everything you bring home has to go into the Chest: Mags's cargo walker
+## that follows Brigid around. Scrap and circuits are carried by hand,
+## biomass is cut out of alien carcasses in the hazmat suit, and survivors
+## follow you to the Chest and strap in.
+const CHEST_R := 0.45
+const CHEST_REACH := 1.9
+const HARVEST_TIME := 2.0
+const BIOMASS_YIELD := {"crawler": 2, "spitter": 2, "flyer": 1, "brute": 6, "burrower": 4, "hive": 12, "mother": 40}
+const CARRY_NAMES := {"scrap": "SCRAP", "circuits": "CIRCUITS", "biomass": "BIOMASS", "cargo": "CARGO"}
+var chest := {}
+var corpses: Array = []
+var pickups: Array = []
+var carrying := {}            ## {} or {"kind", "amount", "model", "item"}
+var hazmat := false
+var harvest_t := 0.0
+var harvest_target = null
+var hands_msg_cd := 0.0
+
 # --- Controls -----------------------------------------------------------------
 const MECH_R := LevelMap.MECH_R
 const PILOT_R := 0.15
@@ -250,6 +269,8 @@ func _ready() -> void:
 	_place_props()
 
 	_setup_mission()
+	if not survival:
+		_spawn_chest()
 
 	_build_backdrop()
 	col_events.resize(COLUMNS)
@@ -333,6 +354,8 @@ func _wreck_prop(p: Dictionary) -> void:
 				if not a["dead"] and a["pos"].distance_to(pp) < 2.2:
 					_damage_alien(a, 60.0)
 		"car":
+			if not survival:
+				_drop_pickup(pp + Vector2(rng.randf_range(-0.3, 0.3), rng.randf_range(-0.3, 0.3)), "scrap", rng.randi_range(4, 8))
 			Sfx.play("hit", -2.0, 0.1, 0.6)
 			shake = maxf(shake, 4.0)
 			explosions.append({"pos": pp, "z": p["z"] + 0.3, "t": 0.0, "dur": 0.7, "size": 0.6, "col": Color(0.5, 0.48, 0.45), "smoke": true})
@@ -425,8 +448,13 @@ func _process(delta: float) -> void:
 		elif climb_t > 0.0:
 			_update_climb(delta)
 		else:
-			_update_player(delta)
-			_update_weapons(delta)
+			if harvest_t > 0.0:
+				_update_harvest(delta)
+			else:
+				_update_player(delta)
+				_update_weapons(delta)
+		if not chest.is_empty() and phase != "drop" and phase != "lift":
+			_update_chest(delta)
 		if phase != "drop" and phase != "lift":
 			_update_mission(delta)
 		flow_timer -= delta
@@ -442,7 +470,15 @@ func _process(delta: float) -> void:
 		for a in aliens:
 			if a["dead"]:
 				a["death_t"] += delta
+	# The dead stay where they fell: that's where the biomass is.
+	for a in aliens:
+		if a["dead"] and a["death_t"] > 0.7:
+			corpses.append({"kind": a["kind"], "pos": a["pos"], "z": map.height_at(a["pos"]), "face": a["face"],
+				"harvested": false, "seed": a["seed"]})
 	aliens = aliens.filter(func(a): return not (a["dead"] and a["death_t"] > 0.7))
+	if corpses.size() > 140:
+		corpses = corpses.slice(corpses.size() - 140)
+	hands_msg_cd -= delta
 	_update_effects(delta)
 	queue_redraw()
 
@@ -475,10 +511,10 @@ func _update_player(delta: float) -> void:
 	var mv := inp * speed * delta
 	var stand := map.height_at(pos)
 	var nx := pos + Vector2(mv.x, 0.0)
-	if not map.blocked(nx, body_r, stand, step_h) and not _parked_mech_blocks(nx, body_r):
+	if not map.blocked(nx, body_r, stand, step_h) and not _parked_mech_blocks(nx, body_r) and not (_chest_blocks(nx, body_r) and not _chest_blocks(pos, body_r)):
 		pos = nx
 	var ny := pos + Vector2(0.0, mv.y)
-	if not map.blocked(ny, body_r, stand, step_h) and not _parked_mech_blocks(ny, body_r):
+	if not map.blocked(ny, body_r, stand, step_h) and not _parked_mech_blocks(ny, body_r) and not (_chest_blocks(ny, body_r) and not _chest_blocks(pos, body_r)):
 		pos = ny
 
 	# Climb steps smoothly; drop off ledges with a heavy landing.
@@ -560,6 +596,12 @@ func _fire_cannon() -> void:
 
 
 func _fire_carbine() -> void:
+	if not carrying.is_empty():
+		fire_cd = 0.4
+		if hands_msg_cd <= 0.0:
+			hands_msg_cd = 2.0
+			_show_msg("HANDS FULL — DROP IT OR TAKE IT TO THE CHEST", 1.6)
+		return
 	if ammo_left["rounds"] <= 0:
 		_out_of_ammo()
 		fire_cd = 0.3
@@ -745,7 +787,6 @@ func _damage_alien(a: Dictionary, amount: float) -> void:
 		_dirt_burst(a["pos"], 4)
 	if _is_nest(a):
 		hives_destroyed += 1
-		loot["biomass"] += 40 if a["kind"] == "mother" else 10
 		for i in 5:
 			var off := Vector2(rng.randf_range(-0.6, 0.6), rng.randf_range(-0.6, 0.6))
 			explosions.append({"pos": a["pos"] + off, "z": a["fz"] + rng.randf_range(0.3, 1.4), "t": -i * 0.08, "dur": 0.9, "size": 1.6, "col": Color(1.0, 0.45, 0.2)})
@@ -757,7 +798,6 @@ func _damage_alien(a: Dictionary, amount: float) -> void:
 		_radio("hive")
 	else:
 		kills += 1
-		loot["biomass"] += 4 if a["kind"] == "brute" else 1
 		if a["kind"] == "brute":
 			brutes += 1
 		explosions.append({"pos": a["pos"], "z": a["fz"] + st["h"] * 0.5, "t": 0.0, "dur": 0.45, "size": st["w"] * 0.9, "col": Color(0.5, 0.95, 0.2)})
@@ -769,6 +809,10 @@ func _damage_player(amount: float, src: Vector2) -> void:
 		return
 	var rel := wrapf((src - pos).angle() - angle, -PI, PI)
 	if on_foot:
+		if harvest_t > 0.0:
+			harvest_t = 0.0
+			harvest_target = null
+			_show_msg("HARVEST INTERRUPTED", 1.5)
 		pilot_hp = maxf(0.0, pilot_hp - amount)
 		hit_flash = 0.3
 		shake = maxf(shake, 6.0)
@@ -1266,7 +1310,7 @@ func _blast_terrain(p: Vector2, z: float) -> void:
 		if not pr.get("crushed", false) and SOLID_PROPS.has(pr["kind"]) and pr["pos"].distance_to(p) < 1.6:
 			_wreck_prop(pr)
 	for sv in survivors_list:
-		if not sv["freed"] and not sv.get("dead", false) and sv["pos"].distance_to(p) < 2.0:
+		if not sv.get("strapped", false) and not sv.get("dead", false) and sv["pos"].distance_to(p) < 2.0:
 			sv["dead"] = true
 			sv["freed"] = true
 			sv["t"] = 99.0
@@ -1292,6 +1336,10 @@ func _radio_line(who: String, text: String) -> void:
 	radio_who = who
 	radio_text = text
 	radio_t = 5.0
+
+
+func _is_nest_kind(k: String) -> bool:
+	return k == "hive" or k == "mother"
 
 
 func _is_nest(a: Dictionary) -> bool:
@@ -1407,6 +1455,8 @@ func _update_drop(delta: float) -> void:
 	floor_z = map.height_at(pos)
 	eye_z = floor_z + EYE + 26.0 * k * k
 	shake = maxf(shake, 2.5 * k)
+	if not chest.is_empty():
+		chest["fz"] = map.height_at(chest["pos"]) + 26.0 * k * k
 	if drop_t <= 0.0:
 		phase = "fight"
 		eye_z = floor_z + EYE
@@ -1423,6 +1473,8 @@ func _update_lift(delta: float) -> void:
 	var k := clampf(lift_t / LIFT_TIME, 0.0, 1.0)
 	eye_z = floor_z + EYE + 24.0 * k * k
 	shake = maxf(shake, 3.0 * (1.0 - k))
+	if not chest.is_empty():
+		chest["fz"] = map.height_at(chest["pos"]) + 24.0 * k * k
 	if lift_t >= LIFT_TIME:
 		state = State.WON
 		_finish()
@@ -1449,6 +1501,7 @@ func _update_waves(delta: float) -> void:
 	if survival:
 		if alive == 0 or (alive <= 2 and wave_timer > 25.0) or wave_timer > 50.0:
 			wave_pause = 6.0
+			corpses.clear()
 			# Repair drones patch Brigid up between waves.
 			for pn in GameState.PARTS:
 				parts[pn] = minf(GameState.max_hp(pn), parts[pn] + GameState.max_hp(pn) * 0.15)
@@ -1498,7 +1551,7 @@ func _objective_met() -> bool:
 		"rescue":
 			var n := 0
 			for sv in survivors_list:
-				if sv["freed"] and not sv.get("stray", false) and not sv.get("dead", false):
+				if sv.get("strapped", false) and not sv.get("stray", false):
 					n += 1
 			return n >= rescue_total
 		"retrieve":
@@ -1513,9 +1566,7 @@ func _objective_met() -> bool:
 
 
 func _update_mission(delta: float) -> void:
-	for sv in survivors_list:
-		if sv["freed"]:
-			sv["t"] += delta
+	_update_followers(delta)
 	for b in beacons:
 		if b["done"]:
 			continue
@@ -1581,12 +1632,19 @@ func _objective_string() -> String:
 			return "KILL THE BROOD MOTHER (%d/%d NESTS DOWN)" % [hives_destroyed, hives_total]
 		"rescue":
 			var n := 0
+			var following := 0
 			for sv in survivors_list:
-				if sv["freed"] and not sv.get("stray", false) and not sv.get("dead", false):
+				if sv.get("strapped", false) and not sv.get("stray", false):
 					n += 1
+				elif sv["freed"] and not sv.get("dead", false):
+					following += 1
+			if following > 0:
+				return "LEAD %d SURVIVOR%s TO THE CHEST (%d/%d SAFE)" % [following, "S" if following > 1 else "", n, rescue_total]
 			return "RESCUE SURVIVORS %d/%d" % [n, rescue_total]
 		"retrieve":
-			return "RECOVER CARGO %d/%d" % [items_got, _cargo_needed()]
+			if carrying.get("kind", "") == "cargo":
+				return "CARRY THE CARGO TO THE CHEST (%d/%d STOWED)" % [items_got, _cargo_needed()]
+			return "RECOVER CARGO %d/%d — CARRY IT TO THE CHEST" % [items_got, _cargo_needed()]
 		"scout":
 			for b in beacons:
 				if not b["done"] and b["prog"] > 0.0:
@@ -1606,44 +1664,310 @@ func _parked_mech_blocks(p: Vector2, r: float) -> bool:
 
 
 func _check_caches() -> void:
-	## Salvage caches, survivors and mission items are picked up by touch.
+	## Salvage is picked up by hand (on foot), one load at a time, and has
+	## to be carried to the Chest. Survivors start following you.
 	var reach := body_r + 0.45
 	for c in caches:
 		if c["taken"] or pos.distance_to(c["pos"]) > reach or absf(floor_z - c["z"]) > 0.7:
+			continue
+		if not on_foot:
+			if hands_msg_cd <= 0.0:
+				hands_msg_cd = 3.0
+				_show_msg("SALVAGE CACHE — CLIMB OUT TO OPEN IT", 1.8)
 			continue
 		c["taken"] = true
 		caches_found += 1
 		Sfx.play("pickup", -2.0, 0.0)
 		var roll := rng.randf()
 		if roll < 0.4:
-			var n := rng.randi_range(6, 12) + diff
-			loot["scrap"] += n
-			_show_msg("SALVAGE CACHE  +%d SCRAP" % n, 2.0)
+			_found_load(c["pos"], "scrap", rng.randi_range(6, 12) + diff)
 		elif roll < 0.6:
-			var n2 := rng.randi_range(2, 4)
-			loot["circuits"] += n2
-			_show_msg("ELECTRONICS  +%d CIRCUITS" % n2, 2.0)
+			_found_load(c["pos"], "circuits", rng.randi_range(2, 4))
 		else:
 			var kind: String = ["shells", "rockets", "rounds"][rng.randi_range(0, 2)]
 			var amount: int = {"shells": rng.randi_range(80, 150), "rockets": 2, "rounds": rng.randi_range(30, 50)}[kind]
 			ammo_left[kind] += amount
-			_show_msg("AMMO CRATE  +%d %s" % [amount, GameState.AMMO_NAMES[kind].to_upper()], 2.0)
+			_show_msg("AMMO CRATE  +%d %s (LOADED STRAIGHT IN)" % [amount, GameState.AMMO_NAMES[kind].to_upper()], 2.0)
+	if on_foot and carrying.is_empty() and harvest_t <= 0.0:
+		for pk in pickups:
+			if pos.distance_to(pk["pos"]) > PILOT_R + 0.45 or absf(floor_z - pk["z"]) > 0.7:
+				continue
+			pickups.erase(pk)
+			_carry(pk["kind"], pk["amount"], pk.get("item"))
+			break
 	for sv in survivors_list:
-		if sv["freed"] or pos.distance_to(sv["pos"]) > reach + 0.2 or absf(floor_z - sv["z"]) > 0.8:
+		if sv["freed"] or sv.get("dead", false) or pos.distance_to(sv["pos"]) > reach + 0.2 or absf(floor_z - sv["z"]) > 0.8:
 			continue
 		sv["freed"] = true
 		sv["t"] = 0.0
-		rescued += 1
 		Sfx.play("pickup", 0.0, 0.0, 0.8)
-		_show_msg("SURVIVOR FOUND — %s" % ("THEY'RE HEADING FOR THE DRONE" if not sv.get("stray", false) else "ONE MORE FOR THE ROCK"), 2.5)
+		_show_msg("SURVIVOR FOUND — THEY'LL FOLLOW YOU TO THE CHEST", 2.5)
 		_radio("rescue")
 	for it in cargo:
-		if it["taken"] or pos.distance_to(it["pos"]) > reach + 0.2 or absf(floor_z - it["z"]) > 0.8:
+		if it["taken"] or it.get("deposited", false) or pos.distance_to(it["pos"]) > reach + 0.2 or absf(floor_z - it["z"]) > 0.8:
+			continue
+		if not on_foot or not carrying.is_empty():
+			if hands_msg_cd <= 0.0:
+				hands_msg_cd = 3.0
+				_show_msg("CLIMB OUT TO CARRY THE CARGO" if not on_foot else "HANDS FULL", 1.8)
 			continue
 		it["taken"] = true
+		_carry("cargo", 1, it)
+		break
+
+
+func _found_load(at: Vector2, kind: String, amount: int) -> void:
+	if carrying.is_empty():
+		_carry(kind, amount, null)
+	else:
+		_drop_pickup(at, kind, amount)
+		_show_msg("%d %s — HANDS FULL, LEFT IT HERE" % [amount, CARRY_NAMES[kind]], 2.0)
+
+
+func _carry(kind: String, amount: int, item) -> void:
+	var model: String = {"scrap": "pile_scrap", "circuits": "pile_circuits", "biomass": "jar_biomass"}.get(kind, "")
+	if kind == "cargo":
+		model = item["kind"]
+	carrying = {"kind": kind, "amount": amount, "model": model, "item": item}
+	Sfx.play("pickup", -4.0, 0.05, 1.1)
+	if kind == "cargo":
+		_show_msg("CARGO IN HAND — TAKE IT TO THE CHEST", 2.0)
+	else:
+		_show_msg("CARRYING %d %s — TAKE IT TO THE CHEST" % [amount, CARRY_NAMES[kind]], 2.0)
+
+
+func _drop_pickup(at: Vector2, kind: String, amount: int, item = null) -> void:
+	var model: String = {"scrap": "pile_scrap", "circuits": "pile_circuits", "biomass": "jar_biomass"}.get(kind, "")
+	pickups.append({"pos": at, "z": map.height_at(at), "kind": kind, "amount": amount, "model": model, "item": item, "face": rng.randf() * TAU})
+
+
+func _drop_carried() -> void:
+	if carrying.is_empty():
+		return
+	var at := pos + Vector2.from_angle(angle) * 0.35
+	if carrying["kind"] == "cargo":
+		var it: Dictionary = carrying["item"]
+		it["taken"] = false
+		it["pos"] = at
+		it["z"] = map.height_at(at)
+	else:
+		_drop_pickup(at, carrying["kind"], carrying["amount"])
+	carrying = {}
+	Sfx.play("step", -12.0, 0.1, 1.4)
+
+
+# --- The Chest -----------------------------------------------------------------
+
+func _spawn_chest() -> void:
+	var spot := map.start + Vector2(1.5, 0)
+	for k in 16:
+		var p := map.start + Vector2.from_angle(TAU * k / 16.0) * 1.6
+		if not map.blocked(p, CHEST_R, map.height_at(p)) and absf(map.height_at(p) - map.height_at(map.start)) < 0.4:
+			spot = p
+			break
+	chest = {"pos": spot, "fz": map.height_at(spot) + 26.0, "face": angle, "anim": 0.0, "moving": false, "stuck_t": 0.0}
+
+
+func _chest_blocks(p: Vector2, r: float) -> bool:
+	return not chest.is_empty() and p.distance_to(chest["pos"]) < CHEST_R + r
+
+
+func _near_chest() -> bool:
+	return not chest.is_empty() and pos.distance_to(chest["pos"]) < CHEST_REACH and absf(floor_z - chest["fz"]) < 1.0
+
+
+func _update_chest(delta: float) -> void:
+	## Trots after you, keeping a couple of metres back. Gets around walls
+	## using the same path field as the aliens; if it gets truly stuck it
+	## catches up the long way round (we skip the boring part).
+	# It follows Brigid. While you're out on foot it waits beside her.
+	var cp: Vector2 = chest["pos"]
+	var goal := mech_pos if on_foot else pos
+	var goal_z := mech_fz + EYE if on_foot else eye_z
+	var to_p := goal - cp
+	var dist := to_p.length()
+	var keep := 2.0 if on_foot else 2.4
+	var step := Vector2.ZERO
+	if dist > keep:
+		var dir := to_p / dist
+		if dist > 3.0 or not map.line_of_sight(cp, chest["fz"] + 1.0, goal, goal_z):
+			dir = _flow_dir(cp) if not on_foot else dir
+		step = dir * minf(3.4, 1.5 + dist * 0.6) * delta
+	var stand := map.height_at(cp)
+	var moved := false
+	for axis in 2:
+		var np := cp + (Vector2(step.x, 0.0) if axis == 0 else Vector2(0.0, step.y))
+		if step == Vector2.ZERO:
+			break
+		if map.blocked(np, CHEST_R, stand) or np.distance_to(pos) < body_r + CHEST_R or (on_foot and np.distance_to(mech_pos) < MECH_R + CHEST_R):
+			continue
+		cp = np
+		moved = true
+	chest["moving"] = moved
+	if moved:
+		chest["anim"] += delta
+		chest["face"] = lerp_angle(chest["face"], step.angle(), minf(1.0, delta * 5.0))
+	chest["pos"] = cp
+	chest["fz"] = move_toward(chest["fz"], map.height_at(cp), delta * 4.0)
+	if dist > 7.0 and not moved:
+		chest["stuck_t"] += delta
+	else:
+		chest["stuck_t"] = 0.0
+	if chest["stuck_t"] > 4.0:
+		for k in 12:
+			var p := goal - Vector2.from_angle(angle + (k - 6) * 0.35) * 2.2
+			var hh := map.height_at(p)
+			if not map.blocked(p, CHEST_R, hh) and absf(hh - map.height_at(goal)) < 0.6:
+				chest["pos"] = p
+				chest["fz"] = hh
+				chest["stuck_t"] = 0.0
+				_dirt_burst(p, 3)
+				_show_msg("THE CHEST CATCHES UP", 1.5)
+				break
+	if not get_meta("chest_told", false) and phase == "fight" and time > 9.0 and GameState.missions_won < 3:
+		set_meta("chest_told", true)
+		_radio_line("mags", "The Chest is trotting behind you. Everything goes in it: scrap, circuits, biomass, people. Hazmat suit's on its hook.")
+	# Anything carried in is stowed; anyone following straps in.
+	if on_foot and not carrying.is_empty() and _near_chest():
+		_deposit()
+	for sv in survivors_list:
+		if sv["freed"] and not sv.get("strapped", false) and not sv.get("dead", false) and sv["pos"].distance_to(chest["pos"]) < CHEST_REACH:
+			sv["strapped"] = true
+			rescued += 1
+			Sfx.play("pickup", -2.0, 0.0, 0.7)
+			_show_msg("SURVIVOR STRAPPED IN — %d ABOARD THE CHEST" % rescued, 2.0)
+
+
+func _deposit() -> void:
+	var kind: String = carrying["kind"]
+	if kind == "cargo":
+		var it: Dictionary = carrying["item"]
+		it["deposited"] = true
 		items_got += 1
-		Sfx.play("pickup", 0.0, 0.0, 1.2)
-		_show_msg("RECOVERED %d/%d" % [items_got, _cargo_needed()], 2.0)
+		_show_msg("CARGO STOWED %d/%d" % [items_got, _cargo_needed()], 2.0)
+	else:
+		loot[kind] += int(carrying["amount"])
+		_show_msg("+%d %s IN THE CHEST" % [carrying["amount"], CARRY_NAMES[kind]], 1.8)
+	carrying = {}
+	Sfx.play("pickup", 0.0, 0.0, 1.3)
+	Sfx.play("hatch", -14.0, 0.1, 1.6)
+
+
+func _update_followers(delta: float) -> void:
+	## Found survivors follow you (Half-Life style) until they reach the Chest.
+	for sv in survivors_list:
+		if not sv["freed"] or sv.get("strapped", false) or sv.get("dead", false):
+			continue
+		sv["t"] += delta
+		var sp: Vector2 = sv["pos"]
+		var to_p := pos - sp
+		var dist := to_p.length()
+		var want := 1.0 + float(survivors_list.find(sv) % 3) * 0.35
+		# Head for the Chest when it's close, otherwise stay with you.
+		var target := pos
+		if not chest.is_empty() and sp.distance_to(chest["pos"]) < 5.0:
+			target = chest["pos"]
+			want = 0.5
+		var to_t := target - sp
+		var d_t := to_t.length()
+		sv["moving"] = false
+		if d_t > want:
+			var dir := to_t / d_t
+			if target == pos and (dist > 3.0 or not map.line_of_sight(sp, sv["z"] + 0.5, pos, eye_z)):
+				dir = _flow_dir(sp)
+			var speed := minf(3.6, 1.6 + d_t * 0.8)
+			var stand := map.height_at(sp)
+			var np := sp + dir * speed * delta
+			for other in survivors_list:
+				if other != sv and other["freed"] and not other.get("strapped", false):
+					var off: Vector2 = np - other["pos"]
+					if off.length() < 0.35 and off.length() > 0.001:
+						np += off.normalized() * 0.02
+			if not map.blocked(np, 0.15, stand, PILOT_STEP) and np.distance_to(pos) > body_r + 0.15 and not _parked_mech_blocks(np, 0.15):
+				sv["pos"] = np
+				sv["moving"] = true
+			sv["face"] = dir.angle()
+		else:
+			sv["face"] = to_p.angle()
+		sv["z"] = map.height_at(sv["pos"])
+
+
+# --- Harvesting biomass ----------------------------------------------------------
+
+func _nearest_corpse():
+	var best = null
+	var bd := 1.6
+	for c in corpses:
+		if c["harvested"]:
+			continue
+		var d: float = pos.distance_to(c["pos"])
+		if d < bd and absf(c["z"] - floor_z) < 0.8:
+			bd = d
+			best = c
+	return best
+
+
+func _update_harvest(delta: float) -> void:
+	## Two seconds of careful cutting in the hazmat suit.
+	var prev := harvest_t
+	harvest_t += delta
+	bob_amount = lerpf(bob_amount, 0.0, minf(1.0, delta * 6.0))
+	if floor(prev * 3.0) != floor(harvest_t * 3.0):
+		Sfx.play("splat", -10.0, 0.3, 1.3)
+	if harvest_t >= HARVEST_TIME + 0.15:
+		var c: Dictionary = harvest_target
+		c["harvested"] = true
+		harvest_t = 0.0
+		harvest_target = null
+		_carry("biomass", int(BIOMASS_YIELD.get(c["kind"], 1)), null)
+
+
+func _action() -> Array:
+	## The context button under EXIT MECH: [label, enabled] or [] for none.
+	if not on_foot or climb_t > 0.0 or state != State.PLAYING or phase == "drop" or phase == "lift":
+		return []
+	if harvest_t > 0.0:
+		return ["HARVESTING…", false]
+	if not carrying.is_empty():
+		return ["DROP " + String(CARRY_NAMES[carrying["kind"]]), true]
+	var corpse = null if survival else _nearest_corpse()
+	if hazmat and corpse != null:
+		return ["HARVEST BIOMASS", true]
+	if _near_chest():
+		return ["TAKE OFF HAZMAT" if hazmat else "PUT ON HAZMAT", true]
+	if corpse != null:
+		return ["HAZMAT ON THE CHEST", false]
+	return []
+
+
+func _do_action() -> void:
+	var act := _action()
+	if act.is_empty():
+		return
+	var label: String = act[0]
+	if not act[1]:
+		if label == "HAZMAT ON THE CHEST":
+			_show_msg("ALIEN TISSUE IS TOXIC — PUT ON THE HAZMAT SUIT AT THE CHEST", 2.2)
+		return
+	Sfx.play("click")
+	if label.begins_with("DROP"):
+		_drop_carried()
+	elif label == "HARVEST BIOMASS":
+		harvest_target = _nearest_corpse()
+		harvest_t = 0.001
+		fire_touch = -1
+		move_touch = -1
+		move_vec = Vector2.ZERO
+		angle = (harvest_target["pos"] - pos).angle()
+		pitch = -get_viewport_rect().size.y * 0.3
+	else:
+		hazmat = not hazmat
+		Sfx.play("hatch", -8.0, 0.0, 1.4)
+		_show_msg("HAZMAT SUIT ON — GO CUT SOME BIOMASS" if hazmat else "HAZMAT SUIT BACK ON ITS HOOK", 1.8)
+
+
+func _action_rect(s: Vector2) -> Rect2:
+	return Rect2(s.x - 206, 294, 190, 50)
 
 
 func _toggle_mech() -> void:
@@ -1703,6 +2027,9 @@ func _start_board() -> void:
 		3:
 			_show_msg("GET LEVEL WITH YOUR MECH", 1.5)
 			return
+	if not carrying.is_empty():
+		_drop_carried()
+		_show_msg("YOU SET IT DOWN TO CLIMB IN", 1.5)
 	climb_out = false
 	climb_from = {"pos": pos, "floor": floor_z, "eye": PILOT_EYE, "angle": angle}
 	climb_to = {"pos": mech_pos, "floor": mech_fz, "eye": EYE, "angle": mech_angle}
@@ -1780,6 +2107,8 @@ func _input(event: InputEvent) -> void:
 			_leave()
 		elif state == State.PLAYING and (event.keycode == KEY_ESCAPE or event.keycode == KEY_P):
 			_set_paused(true)
+		elif state == State.PLAYING and event.keycode == KEY_C:
+			_do_action()
 		elif state == State.PLAYING and event.keycode == KEY_X:
 			_toggle_mech()
 		return
@@ -1796,6 +2125,9 @@ func _input(event: InputEvent) -> void:
 			if _retreat_rect().has_point(p):
 				Sfx.play("click")
 				_set_paused(true)
+				return
+			if _action_rect(s).has_point(p) and not _action().is_empty():
+				_do_action()
 				return
 			if _mech_button_rect(s).has_point(p) and phase != "drop" and phase != "lift":
 				_toggle_mech()
@@ -1865,7 +2197,7 @@ func _leave() -> void:
 
 func _notification(what: int) -> void:
 	# Pause when the phone app goes to the background.
-	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and state == State.PLAYING and is_inside_tree():
+	if what == NOTIFICATION_APPLICATION_PAUSED and state == State.PLAYING and is_inside_tree():
 		_set_paused(true)
 
 
@@ -2346,14 +2678,23 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 		if pr.y > 0.15 and pr.y < MAX_VIEW:
 			items.append([pr.y, 4, cc, pr.x])
 	for sv in survivors_list:
-		if sv["freed"] and sv["t"] > 1.2:
+		if sv.get("strapped", false) or sv.get("dead", false):
 			continue
-		var spos: Vector2 = sv["pos"]
-		if sv["freed"]:
-			spos += (lz - spos).normalized() * sv["t"] * 2.5
-		var pr := _project(spos)
+		var pr := _project(sv["pos"])
 		if pr.y > 0.15 and pr.y < MAX_VIEW:
 			items.append([pr.y, 6, sv, pr.x])
+	for cp in corpses:
+		var pr := _project(cp["pos"])
+		if pr.y > 0.15 and pr.y < 16.0:
+			items.append([pr.y + 0.01, 11, cp, pr.x])
+	for pk in pickups:
+		var pr := _project(pk["pos"])
+		if pr.y > 0.15 and pr.y < MAX_VIEW:
+			items.append([pr.y, 12, pk, pr.x])
+	if not chest.is_empty():
+		var pr := _project(chest["pos"])
+		if pr.y > 0.15 and pr.y < MAX_VIEW:
+			items.append([pr.y, 13, chest, pr.x])
 	for it in cargo:
 		if it["taken"]:
 			continue
@@ -2482,14 +2823,11 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var sfp: Vector2 = o["pos"]
 				var sface := (pos - sfp).angle() + sin(time * 0.7 + o["anim"]) * 0.4
 				if o["freed"]:
-					sface = (lz - sfp).angle()
-				var st2: Texture2D = _view_frame("survivor", sface, sfp, time * 3.0 + o["anim"])
+					sface = o.get("face", sface)
+				var st2: Texture2D = _view_frame("survivor", sface, sfp, time * (6.0 if o.get("moving", false) else 3.0) + o["anim"])
 				var smod := tint.lerp(FOG, fog * 0.6)
-				if o["freed"]:
-					smod.a = clampf(1.2 - o["t"], 0.0, 1.0)
-				var sz: float = map.height_at(o["pos"]) if not o["freed"] else o["z"]
-				if not o["freed"]:
-					_draw_shadow(sfp, sz, 0.18, horizon, proj_scale, fog, ty)
+				var sz: float = map.height_at(o["pos"])
+				_draw_shadow(sfp, sz, 0.18, horizon, proj_scale, fog, ty)
 				var sl: float = tex3d["survivor"]["L"]
 				_billboard(st2, sx, ty, sl, sl, sz, smod, horizon, proj_scale, col_w)
 			7:
@@ -2497,6 +2835,46 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var itex: Texture2D = _view_frame(o["kind"], o["face"], o["pos"], time * 3.0 + o["anim"])
 				var il: float = tex3d[o["kind"]]["L"]
 				_billboard(itex, sx, ty, il, il, o["z"], tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+			11:
+				# A carcass. Harvested ones are hollowed out and grey.
+				var ck: String = o["kind"] + "_dead"
+				var cl: float = tex3d[ck]["L"]
+				var cframe: Texture2D = _view_frame(ck, o["face"], o["pos"], 0.0)
+				var cmod := tint.lerp(FOG, fog * 0.85)
+				var squash := 1.0
+				if o["harvested"]:
+					# Cut open and emptied: greyer and flatter.
+					cmod = cmod.darkened(0.35).lerp(Color(0.35, 0.33, 0.3), 0.35)
+					squash = 0.7
+				_billboard(cframe, sx, ty, cl, cl * squash, o["z"], cmod, horizon, proj_scale, col_w)
+				if not o["harvested"] and hazmat and on_foot and o == _nearest_corpse() and fmod(time, 0.8) < 0.5:
+					_draw_brackets(_body_rect(sx, ty, cl * 0.8, cl * 0.45, o["z"], horizon, proj_scale), Color(0.6, 1.0, 0.3))
+			12:
+				var pm: String = o["model"]
+				var pl2: float = tex3d[pm]["L"]
+				_draw_shadow(o["pos"], o["z"], 0.22, horizon, proj_scale, fog, ty)
+				_billboard(_view_frame(pm, o["face"], o["pos"], time * 3.0), sx, ty, pl2, pl2, o["z"], tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+			13:
+				var chk := "chest_nosuit" if hazmat else "chest"
+				var chl: float = tex3d[chk]["L"]
+				_draw_shadow(o["pos"], map.height_at(o["pos"]), 0.6, horizon, proj_scale, fog, ty)
+				var chf: Texture2D = _view_frame(chk, o["face"], o["pos"], o["anim"] * 7.0 if o["moving"] else 0.0)
+				var cbob: float = absf(sin(o["anim"] * 7.0 * PI * 0.5)) * 0.04 if o["moving"] else 0.0
+				_billboard(chf, sx, ty, chl, chl, o["fz"] + cbob, tint.lerp(FOG, fog * 0.7), horizon, proj_scale, col_w)
+				# Strapped-in survivors riding on the roof.
+				var n_on := 0
+				for sv in survivors_list:
+					if not sv.get("strapped", false):
+						continue
+					var right := Vector2.from_angle(angle).orthogonal()
+					var off := right * (float(n_on % 3) - 1.0) * 0.32
+					var spr := _project(o["pos"] + off)
+					if spr.y > 0.15:
+						var sl2: float = tex3d["survivor"]["L"] * 0.8
+						_billboard(_view_frame("survivor", (pos - o["pos"]).angle(), o["pos"], 0.0), spr.x, spr.y, sl2, sl2, o["fz"] + 1.32 + float(n_on / 3) * 0.1, tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+					n_on += 1
+				if on_foot and _near_chest() and fmod(time, 0.8) < 0.5 and not carrying.is_empty():
+					_draw_brackets(_body_rect(sx, ty, 1.2, 1.4, o["fz"], horizon, proj_scale), Color(1.0, 0.75, 0.25))
 			8:
 				_draw_shadow(o["pos"], o["z"], 0.4, horizon, proj_scale, fog, ty)
 				var bk := "beacon_on" if o["done"] else "beacon_off"
@@ -2641,7 +3019,112 @@ func _carbine_geom(w: float, h: float) -> Array:
 	return [base, tip, tip + dir * 34.0]
 
 
+func _glove_col() -> Color:
+	return Color(0.9, 0.78, 0.15) if hazmat else Color(0.15, 0.13, 0.11)
+
+
+func _draw_carried(w: float, h: float) -> void:
+	## Both hands full: the load sits low in front of you.
+	var sway := Vector2(sin(bob_t * 2.0) * 10.0, absf(sin(bob_t * 2.0)) * 8.0) * bob_amount
+	var c := Vector2(w * 0.5, h * 0.9) + sway
+	var gl := _glove_col()
+	var sleeve := Color(0.85, 0.72, 0.12) if hazmat else Color(0.22, 0.25, 0.2)
+	draw_colored_polygon(PackedVector2Array([Vector2(w * 0.12, h + 30), Vector2(w * 0.24, h + 30), c + Vector2(-110, 20), c + Vector2(-150, 0)]), sleeve)
+	draw_colored_polygon(PackedVector2Array([Vector2(w * 0.88, h + 30), Vector2(w * 0.76, h + 30), c + Vector2(110, 20), c + Vector2(150, 0)]), sleeve)
+	match carrying["kind"]:
+		"scrap":
+			var cols := [Color(0.55, 0.55, 0.58), Color(0.45, 0.3, 0.2), Color(0.35, 0.37, 0.4), Color(0.6, 0.5, 0.3)]
+			for k in 11:
+				var o := Vector2(sin(k * 2.3) * 110.0, -50.0 - cos(k * 1.7) * 45.0 - k * 7.0)
+				draw_set_transform(c + o, sin(k * 1.3) * 0.7, Vector2.ONE)
+				draw_rect(Rect2(-65, -15, 130, 30), cols[k % 4])
+				draw_rect(Rect2(-65, -15, 130, 30), Color(0, 0, 0, 0.5), false, 3.0)
+				draw_line(Vector2(-50, -4), Vector2(40, -4), Color(1, 1, 1, 0.25), 2.0)
+				draw_set_transform(Vector2.ZERO)
+		"circuits":
+			for k in 3:
+				var r2 := Rect2(c + Vector2(-110, -50 - k * 22), Vector2(220, 18))
+				draw_rect(r2, Color(0.1, 0.45, 0.2))
+				for j in 6:
+					draw_rect(Rect2(r2.position + Vector2(14 + j * 34, 4), Vector2(16, 8)), Color(0.12, 0.12, 0.12) if j % 2 == 0 else Color(0.9, 0.75, 0.3))
+		"biomass":
+			var glow := 0.75 + 0.25 * sin(time * 4.0)
+			draw_circle(c + Vector2(0, -70), 95.0, Color(0.5, 1.0, 0.3, 0.12 * glow))
+			draw_rect(Rect2(c + Vector2(-60, -150), Vector2(120, 140)), Color(0.45, 0.95, 0.3, 0.85 * glow))
+			for k in 4:
+				draw_circle(c + Vector2(-30 + k * 20, -40 - fmod(time * 40.0 + k * 30.0, 100.0)), 6.0, Color(0.8, 1.0, 0.6, 0.6))
+			draw_rect(Rect2(c + Vector2(-68, -165), Vector2(136, 22)), Color(0.4, 0.42, 0.45))
+			draw_rect(Rect2(c + Vector2(-68, -14), Vector2(136, 18)), Color(0.4, 0.42, 0.45))
+		_:
+			var col := Color(0.55, 0.45, 0.3)
+			match String(carrying["model"]):
+				"item_fuel": col = Color(0.85, 0.3, 0.15)
+				"item_data": col = Color(0.3, 0.6, 0.9)
+			draw_rect(Rect2(c + Vector2(-120, -130), Vector2(240, 130)), col)
+			draw_rect(Rect2(c + Vector2(-120, -130), Vector2(240, 130)), Color(0, 0, 0, 0.5), false, 3.0)
+			draw_rect(Rect2(c + Vector2(-120, -80), Vector2(240, 14)), col.darkened(0.3))
+	draw_circle(c + Vector2(-120, -20), 30.0, gl)
+	draw_circle(c + Vector2(120, -20), 30.0, gl)
+
+
+func _draw_harvest(w: float, h: float) -> void:
+	## Kneeling at the carcass: forceps, scalpel and a sample jar.
+	var t := clampf(harvest_t / HARVEST_TIME, 0.0, 1.0)
+	var c := Vector2(w * 0.5, h * 0.86)
+	var flesh := Color(0.42, 0.55, 0.2)
+	if harvest_target != null and String(harvest_target["kind"]) in ["brute", "hive", "mother"]:
+		flesh = Color(0.5, 0.25, 0.5)
+	# The open carcass filling the bottom of the view.
+	var pts := PackedVector2Array()
+	for k in 24:
+		var a := PI + PI * k / 23.0
+		pts.append(c + Vector2(cos(a) * w * 0.42, sin(a) * h * 0.36 + 60.0))
+	pts.append(Vector2(w * 0.92, h + 40))
+	pts.append(Vector2(w * 0.08, h + 40))
+	draw_colored_polygon(pts, flesh)
+	for k in 7:
+		var a2 := PI * 1.1 + k * 0.12
+		draw_line(c + Vector2(cos(a2) * w * 0.35, sin(a2) * h * 0.3 + 60.0), c + Vector2(cos(a2) * w * 0.12, sin(a2) * h * 0.1 + 70.0), flesh.darkened(0.35), 4.0)
+	# The cut opens up and the glowing tissue shows.
+	var open := minf(1.0, t * 2.0)
+	draw_colored_polygon(PackedVector2Array([c + Vector2(-130, -10), c + Vector2(0, -10 - 50 * open), c + Vector2(130, -10), c + Vector2(0, -10 + 40 * open)]), Color(0.12, 0.2, 0.05))
+	draw_circle(c + Vector2(0, -12), 34.0 * open, Color(0.6, 1.0, 0.35, 0.85))
+	# Left hand: forceps holding the cut open.
+	var lh := c + Vector2(-170 + sin(time * 5.0) * 6.0, -40)
+	draw_line(lh, c + Vector2(-40, -20 - 30 * open), Color(0.75, 0.78, 0.8), 5.0)
+	draw_line(lh + Vector2(0, 10), c + Vector2(-40, -5 + 25 * open), Color(0.75, 0.78, 0.8), 5.0)
+	draw_circle(lh, 34.0, _glove_col())
+	draw_colored_polygon(PackedVector2Array([lh + Vector2(-30, 10), lh + Vector2(10, 30), Vector2(w * 0.1, h + 40), Vector2(-40, h + 40)]), Color(0.85, 0.72, 0.12))
+	# Right hand: scalpel sawing back and forth, then the jar.
+	var rh := c + Vector2(150 + sin(time * 14.0) * 30.0 * (1.0 - t), -50 + cos(time * 14.0) * 10.0)
+	if t < 0.75:
+		draw_line(rh, rh + Vector2(-90, 30), Color(0.85, 0.88, 0.9), 4.0)
+		draw_line(rh + Vector2(-70, 23), rh + Vector2(-100, 34), Color(1, 1, 1), 2.0)
+	else:
+		var k3 := (t - 0.75) / 0.25
+		var jar := c + Vector2(80, -30 - k3 * 120.0)
+		draw_rect(Rect2(jar - Vector2(28, 40), Vector2(56, 64)), Color(0.5, 1.0, 0.3, 0.85))
+		draw_rect(Rect2(jar - Vector2(31, 48), Vector2(62, 10)), Color(0.4, 0.42, 0.45))
+		rh = jar + Vector2(40, 0)
+	draw_circle(rh, 34.0, _glove_col())
+	draw_colored_polygon(PackedVector2Array([rh + Vector2(30, 10), rh + Vector2(-10, 30), Vector2(w * 0.9, h + 40), Vector2(w + 40, h + 40)]), Color(0.85, 0.72, 0.12))
+	# Goo drips
+	for k in 5:
+		var gy := fmod(time * 90.0 + k * 41.0, 90.0)
+		draw_circle(c + Vector2(-60 + k * 30, -10 + gy), 4.0, Color(0.6, 1.0, 0.35, 0.7 * (1.0 - gy / 90.0)))
+	var bar := Rect2(w * 0.5 - 160, h * 0.33, 320, 16)
+	draw_rect(bar, Color(0, 0, 0, 0.6))
+	draw_rect(Rect2(bar.position, Vector2(bar.size.x * t, bar.size.y)), Color(0.5, 1.0, 0.3))
+	_text("HARVESTING BIOMASS", Vector2(w * 0.5, h * 0.33 - 10), 22, Color(0.7, 1.0, 0.5))
+
+
 func _draw_pilot_gun(w: float, h: float) -> void:
+	if harvest_t > 0.0:
+		_draw_harvest(w, h)
+		return
+	if not carrying.is_empty():
+		_draw_carried(w, h)
+		return
 	var g := _carbine_geom(w, h)
 	var base: Vector2 = g[0]
 	var tip: Vector2 = g[1]
@@ -2650,8 +3133,8 @@ func _draw_pilot_gun(w: float, h: float) -> void:
 	var n := Vector2(-dir.y, dir.x)
 	# Gloved hand and sleeve
 	var grip := base.lerp(tip, 0.3)
-	draw_colored_polygon(PackedVector2Array([Vector2(w + 20, h + 20), Vector2(w * 0.8, h + 20), grip - n * 20 + dir * 10, grip + n * 30 - dir * 10]), Color(0.22, 0.25, 0.2))
-	draw_circle(grip + n * 4, 26.0, Color(0.15, 0.13, 0.11))
+	draw_colored_polygon(PackedVector2Array([Vector2(w + 20, h + 20), Vector2(w * 0.8, h + 20), grip - n * 20 + dir * 10, grip + n * 30 - dir * 10]), Color(0.85, 0.72, 0.12) if hazmat else Color(0.22, 0.25, 0.2))
+	draw_circle(grip + n * 4, 26.0, _glove_col())
 	# Gun body, magazine, barrel and sight
 	draw_colored_polygon(PackedVector2Array([base + n * 30, base - n * 26, tip - n * 12, tip + n * 14]), Color(0.2, 0.21, 0.23))
 	draw_polyline(PackedVector2Array([base + n * 30, tip + n * 14, tip - n * 12]), Color(0.38, 0.4, 0.43), 2.0)
@@ -2667,6 +3150,16 @@ func _draw_pilot_gun(w: float, h: float) -> void:
 
 
 func _draw_visor(w: float, h: float) -> void:
+	if hazmat:
+		# Hazmat hood: a yellow-rimmed faceplate, slightly fogged.
+		draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(0.9, 0.95, 0.6, 0.06))
+		var y := Color(0.85, 0.72, 0.12, 0.95)
+		draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w * 0.12, -40), Vector2(-40, h * 0.45)]), y)
+		draw_colored_polygon(PackedVector2Array([Vector2(w + 40, -40), Vector2(w * 0.88, -40), Vector2(w + 40, h * 0.45)]), y)
+		draw_colored_polygon(PackedVector2Array([Vector2(-40, h + 40), Vector2(-40, h * 0.7), Vector2(w * 0.08, h + 40)]), y)
+		draw_colored_polygon(PackedVector2Array([Vector2(w + 40, h + 40), Vector2(w + 40, h * 0.7), Vector2(w * 0.92, h + 40)]), y)
+		var breath := 0.5 + 0.5 * sin(time * 1.6)
+		draw_circle(Vector2(w * 0.5, h * 1.05), w * 0.12, Color(1, 1, 1, 0.05 * breath))
 	# Helmet visor edges.
 	var c := Color(0.02, 0.03, 0.03, 0.85)
 	draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w + 40, -40), Vector2(w + 40, h * 0.06), Vector2(w * 0.75, h * 0.02), Vector2(w * 0.25, h * 0.02), Vector2(-40, h * 0.06)]), c)
@@ -2852,10 +3345,22 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 		draw_rect(mb, Color(0.1, 0.3, 0.15, 0.9) if glow else Color(0.05, 0.08, 0.07, 0.85))
 		draw_rect(mb, hud if lit else Color(0.3, 0.45, 0.35), false, 2.0)
 		_text(label, mb.get_center() + Vector2(0, 7), 17, hud if lit else Color(0.5, 0.65, 0.55))
+		var act := _action()
+		if not act.is_empty():
+			var ab := _action_rect(Vector2(w, h))
+			var en: bool = act[1]
+			var acol := Color(1.0, 0.8, 0.3) if en else Color(0.6, 0.55, 0.4)
+			draw_rect(ab, Color(0.25, 0.18, 0.04, 0.9) if en and fmod(time, 1.0) < 0.5 else Color(0.08, 0.07, 0.05, 0.85))
+			draw_rect(ab, acol, false, 2.0)
+			_text(act[0], ab.get_center() + Vector2(0, 7), 16, acol)
 
 	if on_foot:
 		var fy := h * 0.955
-		_text("CARBINE  %s ROUNDS    %s" % [_ammo_str("rounds"), "RUNNING" if running else "PUSH STICK ALL THE WAY TO RUN"], Vector2(w * 0.5, fy), 17, hud if ammo_left["rounds"] > 0 else Color(1, 0.3, 0.2))
+		if not carrying.is_empty():
+			var what := "CARGO" if carrying["kind"] == "cargo" else "%d %s" % [carrying["amount"], CARRY_NAMES[carrying["kind"]]]
+			_text("CARRYING %s — TAKE IT TO THE CHEST%s" % [what, "   ·   HAZMAT ON" if hazmat else ""], Vector2(w * 0.5, fy), 17, Color(1.0, 0.8, 0.3))
+		else:
+			_text("CARBINE  %s ROUNDS    %s%s" % [_ammo_str("rounds"), "RUNNING" if running else "PUSH STICK ALL THE WAY TO RUN", "   ·   HAZMAT ON" if hazmat else ""], Vector2(w * 0.5, fy), 17, hud if ammo_left["rounds"] > 0 else Color(1, 0.3, 0.2))
 		_draw_hud_messages(w, h, cc)
 		return
 
@@ -2952,6 +3457,32 @@ func _draw_minimap(w: float) -> void:
 		else:
 			draw_circle(p, 3.5 if a["kind"] != "brute" else 5.5, Color(1.0, 0.25, 0.2) if a["awake"] else Color(0.8, 0.55, 0.2))
 	var mpulse := 0.5 + 0.5 * sin(time * 5.0)
+	if not survival:
+		for cp in corpses:
+			if cp["harvested"]:
+				continue
+			var crl: Vector2 = cp["pos"] - pos
+			if absf(crl.x) < radius - 0.3 and absf(crl.y) < radius - 0.3:
+				draw_rect(Rect2(center + crl * cs - Vector2(2, 2), Vector2(4, 4)), Color(0.5, 0.9, 0.3, 0.7))
+		for pk in pickups:
+			var prl: Vector2 = pk["pos"] - pos
+			if absf(prl.x) < radius - 0.3 and absf(prl.y) < radius - 0.3:
+				draw_rect(Rect2(center + prl * cs - Vector2(3, 3), Vector2(6, 6)), Color(1.0, 0.85, 0.2))
+	for sv2 in survivors_list:
+		if sv2["freed"] and not sv2.get("strapped", false) and not sv2.get("dead", false):
+			var frl: Vector2 = sv2["pos"] - pos
+			if absf(frl.x) < radius - 0.3 and absf(frl.y) < radius - 0.3:
+				draw_circle(center + frl * cs, 3.0, Color(0.6, 1.0, 1.0))
+	if not chest.is_empty():
+		var chr: Vector2 = chest["pos"] - pos
+		var chc := Color(1.0, 0.65, 0.15)
+		if absf(chr.x) < radius - 0.3 and absf(chr.y) < radius - 0.3:
+			var q := center + chr * cs
+			draw_rect(Rect2(q - Vector2(5, 4), Vector2(10, 8)), chc)
+			draw_rect(Rect2(q - Vector2(5, 4), Vector2(10, 8)), Color(0, 0, 0), false, 1.0)
+		else:
+			var cv := chr.normalized()
+			draw_rect(Rect2(center + cv * (mm.size.x * 0.5 - 8.0) - Vector2(4, 3), Vector2(8, 6)), chc)
 	for sv in survivors_list:
 		if sv["freed"]:
 			continue
@@ -3024,7 +3555,9 @@ func _draw_minimap(w: float) -> void:
 	# Altitude readout under the minimap.
 	_text("ELEV %+.1f" % floor_z, Vector2(mm.get_center().x, mm.end.y + 20.0), 15, Color(0.4, 1.0, 0.6, 0.8))
 	if not survival:
-		_text("SCRAP %d · CIRC %d · BIO %d" % [loot["scrap"], loot["circuits"], loot["biomass"]], Vector2(mm.get_center().x, mm.end.y + 102.0), 14, Color(0.9, 0.85, 0.6, 0.9))
+		_text("IN CHEST: SCRAP %d · CIRC %d · BIO %d" % [loot["scrap"], loot["circuits"], loot["biomass"]], Vector2(mm.get_center().x, mm.end.y + 156.0), 13, Color(0.9, 0.85, 0.6, 0.9))
+		if rescued > 0:
+			_text("%d SURVIVOR%s STRAPPED IN" % [rescued, "S" if rescued > 1 else ""], Vector2(mm.get_center().x, mm.end.y + 174.0), 13, Color(0.9, 0.85, 0.6, 0.9))
 
 
 func _draw_touch_controls(w: float, h: float) -> void:
@@ -3070,7 +3603,7 @@ func _draw_end_screen(w: float, h: float) -> void:
 	var lines := [
 		"Objective: " + ("complete" if objective_done else "not complete"),
 		"Aliens killed: %d     Survivors rescued: %d" % [kills, rescued],
-		"Found: %d scrap · %d circuits · %d biomass" % [loot["scrap"], loot["circuits"], loot["biomass"]],
+		"In the Chest: %d scrap · %d circuits · %d biomass" % [loot["scrap"], loot["circuits"], loot["biomass"]],
 		"Ammo left: %d shells · %d rockets · %d rounds" % [ammo_left["shells"], ammo_left["rockets"], ammo_left["rounds"]],
 	]
 	if state == State.LOST:

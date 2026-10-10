@@ -111,12 +111,35 @@ See [STORY.md](STORY.md) for the world, the characters and the story.
 5. **Night at the Rock:** loot comes home, buildings produce, the crew
    talks, a new day starts with new operations.
 
+## The Chest, salvage and biomass
+Everything you bring home has to be put in **the Chest**: Mags's cargo
+walker, a hazard-striped box on four legs that trots after Brigid and
+waits beside her when you climb out. Whatever is in the Chest when the
+Gannet lifts you out comes home. Whatever isn't is lost.
+- **Scrap and circuits:** climb out and open salvage caches by hand, or
+  pick up the scrap left by cars Brigid crushes. You carry one load at a
+  time in both hands (no shooting while your hands are full), and walk it
+  back to the Chest. You can drop a load and come back for it.
+  Ammo crates load straight into your guns.
+- **Biomass:** alien bodies stay where they fall. Put on the hazmat suit
+  (it hangs on the Chest), kneel at a carcass and cut it open: two seconds
+  with forceps and scalpel, and you have a glowing jar of biomass. Carry
+  it to the Chest. Bigger aliens give more (crawler 2, brute 6, hive 12,
+  Brood Mother 40). Take the suit off at the Chest when you're done.
+- **People:** survivors you find follow you, Half-Life style, until they
+  reach the Chest, where they strap in on the roof. Rockets can still kill
+  them on the way.
+- **Cargo** (retrieve missions) is carried to the Chest the same way.
+- The context button under EXIT MECH changes as needed: PUT ON / TAKE OFF
+  HAZMAT, HARVEST BIOMASS, DROP (keyboard: C).
+- In Survival there is no Chest; bodies are cleared after every wave.
+
 ## Mission types
 | Type | Job |
 |---|---|
 | Destroy | Kill every hive. The song stops and the rest of the Swarm collapses. |
-| Rescue | Find survivors hiding in bunkers (on foot) and send them to the drone. |
-| Retrieve | Recover fuel canisters, data cores or supply crates. |
+| Rescue | Find survivors hiding in bunkers (on foot) and lead them to the Chest. |
+| Retrieve | Carry fuel canisters, data cores or supply crates to the Chest. |
 | Survive | Hold out against waves until the Gannet can land. |
 | Scout | Stand by relay beacons until they come online. |
 | Boss | The Brood Mother and its guard hives. |
@@ -129,7 +152,7 @@ Sometimes a stray survivor is hiding even when nobody called for help.
 | People | Rescues | Working base modules (they need beds) |
 | Scrap | Salvage crane, caches, mission rewards | Building, repairs, ammo, research |
 | Circuits | Circuit shop, caches, scouting/retrieval | Building, rockets, research |
-| Biomass | Every alien killed (hives give lots) | Research, bioreactor fuel |
+| Biomass | Harvested from alien carcasses in the hazmat suit | Research, bioreactor fuel |
 | Fuel | Bioreactor, rewards | Every dropship flight |
 | Shells / Rockets / Rounds | Ammo factory, ammo crates | Cannon, rocket pod, carbine |
 
@@ -210,6 +233,7 @@ coloured by type, briefing on the right, LAUNCH always visible),
 hints like "3 idle" or "! repair".
 
 ## Roadmap
+- **3.2:** alien bodies stay; the Chest (cargo walker) that everything must be carried to; hazmat suit and biomass harvesting; survivors follow you to the Chest.
 - **3.1:** two new aliens: the Flyer and the Burrower.
 - **3.0:** main menu (Survival, Continue, New Game, Load Game with 3 slots,
   Settings, Quit), pause menu in battle, endless Survival mode with infinite
