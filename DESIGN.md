@@ -16,8 +16,13 @@ the swarm.
   only where nothing nearer already covers the screen. That is how you
   can see over low walls, look down from platforms and into craters.
 - Looking up/down slides the view (y-shearing, like Doom/Duke Nukem 3D).
-- Aliens, props, rockets and explosions are flat sprites scaled by
-  distance and cut off by whatever terrain is in front of them.
+- Aliens, survivors, the parked mech, crates and beacons are small 3D
+  models (built from lit ellipsoids and boxes in `model_art.gd`) that are
+  pre-rendered from 8 directions with walk frames. The game shows the
+  view that matches the angle you see each one from, so creatures turn,
+  show their sides and backs, and the mech shows its hatch from behind.
+  Each casts a perspective shadow on the ground and bobs as it walks.
+- Sprites are cut off by whatever terrain is in front of them.
 - Not possible with this trick: bridges, or rooms stacked on rooms.
 - The minimap is simply the grid drawn from above.
 - No 3D models, no image files: all sprites and sounds are generated
@@ -162,6 +167,8 @@ flow field (pathfinding toward the player).
   X exit/board, Shift run on foot.
 
 ## Roadmap
+- **2.1:** solid-looking sprites: 3D-modelled, 8-direction views, walk
+  cycles, ground shadows.
 - **2.0:** story campaign (12 missions, 3 acts, cast of 6), the Rock as a
   base with modules, people as crew, resources instead of money, limited
   ammunition and an ammo factory, air drops and dropship extraction,
@@ -185,7 +192,8 @@ flow field (pathfinding toward the player).
 ## Files
 - `scripts/battle/battle.gd`: raycaster, combat, HUD, touch input.
 - `scripts/battle/level_map.gd`: grid map generation, raycasting, pathfinding.
-- `scripts/battle/alien_art.gd`: procedurally painted sprites.
+- `scripts/battle/model_art.gd`: tiny 3D model renderer and the models.
+- `scripts/battle/alien_art.gd`: flat painted sprites (rocks, crystals, dropship).
 - `scripts/base/base.gd`: the Rock: map room, modules and people, Brigid, lab.
 - `scripts/base/rock_scene.gd`: animated drawing of the Rock.
 - `scripts/story.gd`: all the writing: cast, missions, radio, chatter.

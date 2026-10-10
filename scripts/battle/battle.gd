@@ -11,6 +11,7 @@ const LevelMap = preload("res://scripts/battle/level_map.gd")
 const AlienArt = preload("res://scripts/battle/alien_art.gd")
 const MechDiagram = preload("res://scripts/mech_diagram.gd")
 const Story = preload("res://scripts/story.gd")
+const ModelArt = preload("res://scripts/battle/model_art.gd")
 
 # --- View ---------------------------------------------------------------------
 const COLUMNS := 200          ## rays per frame; lower = faster on old phones
@@ -66,6 +67,7 @@ enum State { PLAYING, WON, LOST, RETREATED }
 var state := State.PLAYING
 var map: LevelMap
 var tex := {}
+var tex3d := {}               ## 3D-rendered sprites: kind -> {"L", "dirs": [dir][frame]}
 var font: Font
 var rng := RandomNumberGenerator.new()
 
@@ -182,7 +184,7 @@ func _ready() -> void:
 	diff = int(op.get("diff", 1))
 	rng.seed = int(op.get("seed", 7)) + 99
 	tex = AlienArt.build_all()
-	tex["mother"] = tex["hive"]
+	tex3d = ModelArt.build_all()
 	pilot_max_hp = GameState.pilot_max_hp()
 	pilot_hp = pilot_max_hp
 	for a in GameState.AMMO:
@@ -271,7 +273,7 @@ func _spawn(kind: String, p: Vector2, awake: bool) -> Dictionary:
 		"kind": kind, "pos": p, "fz": map.height_at(p), "hp": hp, "max": hp, "awake": awake,
 		"cd": rng.randf_range(0.5, 2.0) if kind == "hive" or kind == "mother" else 0.5, "anim": rng.randf() * 10.0,
 		"flash": 0.0, "dead": false, "death_t": 0.0, "lunge": 0.0, "moving": false,
-		"seed": rng.randf() * TAU, "st": st,
+		"seed": rng.randf() * TAU, "st": st, "face": rng.randf() * TAU,
 	}
 	aliens.append(a)
 	return a
@@ -763,6 +765,9 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 
 	var step: Vector2 = move_dir.limit_length(1.0) * st["speed"] * speed_mul * delta
 	a["moving"] = step.length() > 0.0005
+	# Turn to face where we're going, or the player when standing.
+	var want: float = step.angle() if a["moving"] and a["kind"] != "spitter" else to_p.angle()
+	a["face"] = lerp_angle(a["face"], want, minf(1.0, delta * 8.0))
 	var r: float = st["r"]
 	var stand := map.height_at(a["pos"])
 	var nx: Vector2 = a["pos"] + Vector2(step.x, 0.0)
@@ -1040,10 +1045,10 @@ func _setup_mission() -> void:
 			spots2.append_array(_pick_cells(n - k, true, 7, 5.0, spots2))
 			var kind := "item_" + String(op.get("item_kind", "supply"))
 			for sp: Vector2 in spots2:
-				cargo.append({"pos": sp, "z": map.height_at(sp), "taken": false, "kind": kind, "anim": rng.randf() * 3.0})
+				cargo.append({"pos": sp, "z": map.height_at(sp), "taken": false, "kind": kind, "anim": rng.randf() * 3.0, "face": rng.randf() * TAU})
 		"scout":
 			for sp: Vector2 in _pick_cells(int(op.get("beacons", 3)), true, 8, 7.0):
-				beacons.append({"pos": sp, "z": map.height_at(sp), "prog": 0.0, "done": false})
+				beacons.append({"pos": sp, "z": map.height_at(sp), "prog": 0.0, "done": false, "face": rng.randf() * TAU})
 		"survive":
 			waves_total = int(op.get("waves", 3))
 			breaches = _pick_cells(4, true, 10, 6.0)
@@ -1054,7 +1059,7 @@ func _setup_mission() -> void:
 		var sp2: Vector2 = nooks.pop_front()
 		survivors_list.append({"pos": sp2, "z": map.height_at(sp2), "freed": false, "anim": 0.0, "t": 0.0, "stray": true})
 	for sp3: Vector2 in nooks:
-		caches.append({"pos": sp3, "z": map.height_at(sp3), "taken": false, "anim": rng.randf() * 3.0})
+		caches.append({"pos": sp3, "z": map.height_at(sp3), "taken": false, "anim": rng.randf() * 3.0, "face": rng.randf() * TAU})
 	# Landing zone for pickup.
 	if mtype == "survive":
 		lz = map.start
@@ -1825,12 +1830,18 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 		match it[1]:
 			0:
 				var st: Dictionary = o["st"]
-				var frames: Array = tex[o["kind"]]
-				var rate := 7.0 if o["moving"] else 2.0
-				var frame: Texture2D = frames[int(o["anim"] * rate) % frames.size()]
+				var lw: float = tex3d[o["kind"]]["L"]
+				var nest := _is_nest(o)
+				var rate := 7.0 if o["moving"] else 0.0
+				if nest:
+					rate = 2.0
+				var frame: Texture2D = _view_frame(o["kind"], o["face"], o["pos"], o["anim"] * rate)
 				var mod := Color.WHITE.lerp(FOG, fog * 0.85)
-				var ww: float = st["w"] * (1.0 + o["lunge"] * 0.6)
-				var hh: float = st["h"] * (1.0 + o["lunge"] * 0.3)
+				var ww: float = lw * (1.0 + o["lunge"] * 0.25)
+				var hh: float = lw * (1.0 + o["lunge"] * 0.15)
+				var bob: float = absf(sin(o["anim"] * rate * PI * 0.5)) * 0.05 * lw if o["moving"] else 0.0
+				if not o["dead"]:
+					_draw_shadow(o["pos"], o["fz"], st["w"] * 0.45, horizon, proj_scale, fog, ty)
 				if o["dead"]:
 					var k: float = clampf(o["death_t"] / 0.6, 0.0, 1.0)
 					hh *= 1.0 - k
@@ -1839,7 +1850,8 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					mod.a = 1.0 - k
 				if o["flash"] > 0.0:
 					mod = Color(2.0, 2.0, 2.0)
-				var rect := _billboard(frame, sx, ty, ww, hh, o["fz"], mod, horizon, proj_scale, col_w)
+				_billboard(frame, sx, ty, ww, hh, o["fz"] + bob, mod, horizon, proj_scale, col_w)
+				var rect := _body_rect(sx, ty, st["w"], st["h"], o["fz"], horizon, proj_scale)
 				if not o["dead"] and (_is_nest(o) or o["kind"] == "brute") and o["hp"] < o["max"] and rect.size.x > 6.0:
 					var bar := Rect2(rect.position.x, rect.position.y - 10.0, rect.size.x, 5.0)
 					if bar.position.y < _clip_at(c, ty):
@@ -1868,24 +1880,34 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					draw_circle(Vector2(sx, cy), r2 * 1.8, Color(0.5, 1.0, 0.1, 0.3))
 					draw_circle(Vector2(sx, cy), r2, Color(0.75, 1.0, 0.3))
 			4:
-				var cf: Array = tex["cache"]
-				var ct: Texture2D = cf[int(time * 3.0 + o["anim"]) % cf.size()]
-				_billboard(ct, sx, ty, 0.6, 0.6, o["z"], Color.WHITE.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+				_draw_shadow(o["pos"], o["z"], 0.3, horizon, proj_scale, fog, ty)
+				var ct: Texture2D = _view_frame("cache", o["face"], o["pos"], time * 3.0 + o["anim"])
+				_billboard(ct, sx, ty, tex3d["cache"]["L"], tex3d["cache"]["L"], o["z"], Color.WHITE.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
 			6:
-				var sframes: Array = tex["survivor"]
-				var st2: Texture2D = sframes[int(time * 3.0 + o["anim"]) % 2]
+				var sfp: Vector2 = o["pos"]
+				var sface := (pos - sfp).angle() + sin(time * 0.7 + o["anim"]) * 0.4
+				if o["freed"]:
+					sface = (lz - sfp).angle()
+				var st2: Texture2D = _view_frame("survivor", sface, sfp, time * 3.0 + o["anim"])
 				var smod := Color.WHITE.lerp(FOG, fog * 0.6)
 				if o["freed"]:
 					smod.a = clampf(1.2 - o["t"], 0.0, 1.0)
 				var sz: float = map.height_at(o["pos"]) if not o["freed"] else o["z"]
-				_billboard(st2, sx, ty, 0.45, 0.8, sz, smod, horizon, proj_scale, col_w)
+				if not o["freed"]:
+					_draw_shadow(sfp, sz, 0.18, horizon, proj_scale, fog, ty)
+				var sl: float = tex3d["survivor"]["L"]
+				_billboard(st2, sx, ty, sl, sl, sz, smod, horizon, proj_scale, col_w)
 			7:
-				var iframes: Array = tex[o["kind"]]
-				var itex: Texture2D = iframes[int(time * 3.0 + o["anim"]) % iframes.size()]
-				_billboard(itex, sx, ty, 0.55, 0.55, o["z"], Color.WHITE.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+				_draw_shadow(o["pos"], o["z"], 0.28, horizon, proj_scale, fog, ty)
+				var itex: Texture2D = _view_frame(o["kind"], o["face"], o["pos"], time * 3.0 + o["anim"])
+				var il: float = tex3d[o["kind"]]["L"]
+				_billboard(itex, sx, ty, il, il, o["z"], Color.WHITE.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
 			8:
-				var btex: Texture2D = tex["beacon_on" if o["done"] else "beacon_off"][0]
-				var brect := _billboard(btex, sx, ty, 0.9, 2.6, o["z"], Color.WHITE.lerp(FOG, fog * 0.7), horizon, proj_scale, col_w)
+				_draw_shadow(o["pos"], o["z"], 0.4, horizon, proj_scale, fog, ty)
+				var bk := "beacon_on" if o["done"] else "beacon_off"
+				var btex: Texture2D = _view_frame(bk, o["face"], o["pos"], 0.0)
+				_billboard(btex, sx, ty, tex3d[bk]["L"], tex3d[bk]["L"], o["z"], Color.WHITE.lerp(FOG, fog * 0.7), horizon, proj_scale, col_w)
+				var brect := _body_rect(sx, ty, 0.7, 2.6, o["z"], horizon, proj_scale)
 				if not o["done"] and o["prog"] > 0.0 and brect.size.x > 4.0:
 					var pbar := Rect2(brect.position.x - 10, brect.position.y - 12, brect.size.x + 20, 6)
 					draw_rect(pbar, Color(0, 0, 0, 0.6))
@@ -1908,9 +1930,11 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				if gy < clip10:
 					draw_circle(Vector2(sx, gy), bw * 1.4, Color(0.5, 1.0, 0.6, 0.6 * pulse))
 			5:
-				var from_behind := (pos - mech_pos).dot(Vector2.from_angle(mech_angle)) < 0.0
-				var mt: Texture2D = tex["mech_back" if from_behind else "mech_front"][0]
-				var mrect := _billboard(mt, sx, ty, 1.6, 2.1, mech_fz, Color.WHITE.lerp(FOG, fog * 0.85), horizon, proj_scale, col_w)
+				_draw_shadow(mech_pos, mech_fz, 0.6, horizon, proj_scale, fog, ty)
+				var mt: Texture2D = _view_frame("mech", mech_angle, mech_pos, 0.0)
+				var ml: float = tex3d["mech"]["L"]
+				_billboard(mt, sx, ty, ml, ml, mech_fz, Color.WHITE.lerp(FOG, fog * 0.85), horizon, proj_scale, col_w)
+				var mrect := _body_rect(sx, ty, 1.3, 2.0, mech_fz, horizon, proj_scale)
 				if on_foot and climb_t <= 0.0 and _can_board() == 0 and fmod(time, 0.8) < 0.5:
 					_draw_brackets(mrect, Color(0.4, 1.0, 0.6))
 			3:
@@ -1930,6 +1954,42 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					draw_circle(Vector2(sx, cy2), rr * 0.7, Color(ec.r, ec.g, ec.b, 0.9 * (1.0 - k2)))
 					if k2 < 0.35:
 						draw_circle(Vector2(sx, cy2), rr * 0.4, Color(1, 1, 0.9, 1.0 - k2 * 2.5))
+
+
+func _view_frame(kind: String, face: float, at: Vector2, frame_pos: float) -> Texture2D:
+	## Picks the pre-rendered view that matches the angle we see the object from.
+	var set3: Dictionary = tex3d[kind]
+	var rel := wrapf(face - (pos - at).angle(), -PI, PI)
+	var d := posmod(int(round(-rel / (TAU / ModelArt.DIRS))), ModelArt.DIRS)
+	var frames: Array = set3["dirs"][d]
+	return frames[posmod(int(frame_pos), frames.size())]
+
+
+func _draw_shadow(at: Vector2, z: float, radius: float, horizon: float, ps: float, fog: float, depth: float) -> void:
+	## A soft dark ellipse on the ground under an object, in true perspective.
+	if z > eye_z - 0.05:
+		return
+	var center := _project(at)
+	if center.y < 0.4:
+		return
+	var cy := horizon + (eye_z - z) * ps / center.y
+	var col_w := get_viewport_rect().size.x / COLUMNS
+	if cy >= _clip_at(clampi(int(center.x / col_w), 0, COLUMNS - 1), depth + 0.2):
+		return
+	var pts := PackedVector2Array()
+	for k in 14:
+		var pr := _project(at + Vector2.from_angle(TAU * k / 14.0) * radius)
+		if pr.y < 0.3:
+			return
+		pts.append(Vector2(pr.x, horizon + (eye_z - z) * ps / pr.y))
+	draw_colored_polygon(pts, Color(0, 0, 0, 0.4 * (1.0 - fog)))
+
+
+func _body_rect(sx: float, ty: float, w: float, h: float, z: float, horizon: float, ps: float) -> Rect2:
+	var bottom := horizon + (eye_z - z) * ps / ty
+	var sw := w * ps / ty
+	var sh := h * ps / ty
+	return Rect2(sx - sw * 0.5, bottom - sh, sw, sh)
 
 
 func _billboard(t: Texture2D, sx: float, ty: float, ww: float, hh: float, z: float, mod: Color, horizon: float, proj_scale: float, col_w: float) -> Rect2:
