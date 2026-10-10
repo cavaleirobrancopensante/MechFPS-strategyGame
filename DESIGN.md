@@ -185,6 +185,8 @@ Red corner brackets appear when the crosshair is on an alien.
 | Crawler | Fast, weak, swarms you in melee. |
 | Spitter | Keeps distance, circles, spits acid. |
 | Brute | Slow, huge HP, heavy melee hits. From Operation 2. |
+| Flyer | Wasp-like. Flies over walls at rooftop height, circles, then dives at the cockpit and climbs away. Look up! Its shadow on the ground gives it away. |
+| Burrower | Tunnels under everything as a moving mound of dirt (a pulsing ring on the minimap). Bullets can't reach it; rockets hurt it and blast it out. Bursts out of the ground next to you, fights, and digs back down if you run. |
 | Hive | Stationary spawner. Destroy them all to win. |
 
 Aliens sleep until they see you, then chase you around walls using a
@@ -208,6 +210,7 @@ coloured by type, briefing on the right, LAUNCH always visible),
 hints like "3 idle" or "! repair".
 
 ## Roadmap
+- **3.1:** two new aliens: the Flyer and the Burrower.
 - **3.0:** main menu (Survival, Continue, New Game, Load Game with 3 slots,
   Settings, Quit), pause menu in battle, endless Survival mode with infinite
   ammo, redesigned base screen, seven zone themes with weather, map layouts

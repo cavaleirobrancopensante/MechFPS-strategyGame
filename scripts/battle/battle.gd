@@ -69,6 +69,10 @@ const ALIEN_TYPES := {
 	"crawler": {"hp": 30.0, "speed": 2.4, "dmg": 6.0, "range": 0.9, "cd": 0.8, "w": 1.0, "h": 0.9, "r": 0.25},
 	"spitter": {"hp": 45.0, "speed": 1.5, "dmg": 9.0, "range": 7.0, "cd": 2.2, "w": 0.85, "h": 1.15, "r": 0.25},
 	"brute": {"hp": 170.0, "speed": 1.15, "dmg": 18.0, "range": 1.25, "cd": 1.5, "w": 1.6, "h": 1.8, "r": 0.4},
+	## Flies over walls at rooftop height, then dives at your cockpit.
+	"flyer": {"hp": 22.0, "speed": 3.4, "dmg": 6.0, "range": 0.9, "cd": 1.0, "w": 1.0, "h": 0.8, "r": 0.25, "hover": 2.8},
+	## Tunnels under everything, then bursts out of the ground beside you.
+	"burrower": {"hp": 95.0, "speed": 1.6, "dmg": 13.0, "range": 1.1, "cd": 1.3, "w": 1.4, "h": 1.1, "r": 0.35, "dig": 2.7},
 	"hive": {"hp": 300.0, "speed": 0.0, "dmg": 0.0, "range": 0.0, "cd": 5.0, "w": 2.0, "h": 1.7, "r": 0.5},
 	"mother": {"hp": 1500.0, "speed": 0.0, "dmg": 0.0, "range": 0.0, "cd": 3.0, "w": 3.8, "h": 3.2, "r": 0.9},
 }
@@ -360,9 +364,18 @@ func _build_backdrop() -> void:
 func _pick_kind() -> String:
 	var m := diff
 	var r := rng.randf()
-	if m >= 2 and r < 0.06 + 0.03 * m:
-		return "brute"
-	if r < 0.35:
+	var t := 0.0
+	if m >= 2:
+		t = 0.06 + 0.03 * m
+		if r < t:
+			return "brute"
+		t += 0.12
+		if r < t:
+			return "flyer"
+		t += 0.08
+		if r < t:
+			return "burrower"
+	if r < t + 0.3:
 		return "spitter"
 	return "crawler"
 
@@ -376,6 +389,18 @@ func _spawn(kind: String, p: Vector2, awake: bool) -> Dictionary:
 		"flash": 0.0, "dead": false, "death_t": 0.0, "lunge": 0.0, "moving": false,
 		"seed": rng.randf() * TAU, "st": st, "face": rng.randf() * TAU,
 	}
+	match kind:
+		"flyer":
+			a["mode"] = "cruise"
+			a["mode_t"] = 0.0
+			a["fz"] = map.height_at(p) + 0.6
+		"burrower":
+			a["under"] = true
+			a["emerge"] = 0.0
+			a["sink"] = 0.0
+			a["up_t"] = 0.0
+			a["dig_t"] = 0.0
+			a["fz"] = map.height_at(p) - st["h"]
 	aliens.append(a)
 	return a
 
@@ -605,7 +630,7 @@ func _find_target(spread: Vector2):
 	var best = null
 	var best_d := INF
 	for a in aliens:
-		if a["dead"]:
+		if a["dead"] or a.get("under", false):
 			continue
 		var pr := _project(a["pos"])
 		if pr.y <= 0.2 or pr.y > MAX_VIEW:
@@ -711,6 +736,13 @@ func _damage_alien(a: Dictionary, amount: float) -> void:
 	a["dead"] = true
 	a["death_t"] = 0.0
 	var st: Dictionary = a["st"]
+	if a.get("under", false) or a.get("emerge", 0.0) > 0.0 or a.get("sink", 0.0) > 0.0:
+		# Killed in its tunnel: the body is thrown up with the dirt.
+		a["under"] = false
+		a["emerge"] = 0.0
+		a["sink"] = 0.0
+		a["fz"] = map.height_at(a["pos"])
+		_dirt_burst(a["pos"], 4)
 	if _is_nest(a):
 		hives_destroyed += 1
 		loot["biomass"] += 40 if a["kind"] == "mother" else 10
@@ -812,9 +844,24 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 	a["lunge"] = maxf(0.0, a["lunge"] - delta)
 	if a["dead"]:
 		a["death_t"] += delta
+		if a["kind"] == "flyer":
+			a["fz"] = move_toward(a["fz"], map.height_at(a["pos"]), delta * 7.0)
 		return
 	a["cd"] -= delta
+	if a["kind"] == "flyer":
+		_update_flyer(a, delta)
+		return
+	if a["kind"] == "burrower" and (a["under"] or a["emerge"] > 0.0 or a["sink"] > 0.0):
+		_update_burrower(a, delta)
+		return
 	a["fz"] = move_toward(a["fz"], map.height_at(a["pos"]), delta * 5.0)
+	if a["kind"] == "burrower":
+		# On the surface: fight, and dig back down if you get away.
+		a["up_t"] += delta
+		if a["up_t"] > 7.0 and pos.distance_to(a["pos"]) > 5.5:
+			a["sink"] = 0.8
+			_dirt_burst(a["pos"], 4)
+			return
 	var to_p: Vector2 = pos - a["pos"]
 	var dist := to_p.length()
 	var st: Dictionary = a["st"]
@@ -884,6 +931,165 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 		a["pos"] = ny
 
 
+func _first_sighting(kind: String) -> void:
+	if get_meta("seen_" + kind, false):
+		return
+	set_meta("seen_" + kind, true)
+	if kind == "flyer":
+		_radio_line("pip", "Flyers! Up high, over the rooftops. Look up, Wren!")
+	elif kind == "burrower":
+		_radio_line("sandoval", "Seismic contact. Something is digging toward you. Rockets will flush it out.")
+
+
+func _update_flyer(a: Dictionary, delta: float) -> void:
+	## Cruises over the rooftops, weaving, then dives at the cockpit and
+	## climbs away after the hit.
+	var st: Dictionary = a["st"]
+	var to_p: Vector2 = pos - a["pos"]
+	var dist := to_p.length()
+	var ground := map.height_at(a["pos"])
+	if not a["awake"]:
+		a["moving"] = false
+		a["fz"] = move_toward(a["fz"], ground + st["hover"], delta * 1.5)
+		if dist < 11.0:
+			a["awake"] = true
+			_first_sighting("flyer")
+			Sfx.play("screech", lerpf(-6.0, -16.0, dist / 11.0), 0.3, 1.6)
+		return
+	a["mode_t"] -= delta
+	var dir := to_p / maxf(dist, 0.001)
+	var move := Vector2.ZERO
+	var speed: float = st["speed"]
+	# Fly high enough to clear whatever is underneath and just ahead.
+	var ahead: Vector2 = a["pos"] + dir * 0.9
+	var clear := maxf(ground, map.height_at(ahead)) + 0.4
+	var cruise_z := maxf(clear, ground + st["hover"])
+	var want_z := cruise_z
+	match a["mode"]:
+		"cruise":
+			var weave := Vector2(-dir.y, dir.x) * sin(a["anim"] * 2.3 + a["seed"]) * 0.7
+			if dist > 3.0:
+				move = dir + weave
+			else:
+				# Circle around you, waiting for an opening.
+				move = Vector2(-dir.y, dir.x) * (1.0 if sin(a["seed"]) > 0.0 else -1.0) + dir * (dist - 2.6) * 0.5
+			if dist < 4.0 and a["cd"] <= 0.0:
+				a["mode"] = "dive"
+				a["mode_t"] = 2.5
+				Sfx.play("screech", -6.0, 0.2, 1.8)
+		"dive":
+			move = dir
+			speed *= 1.5
+			want_z = maxf(clear, eye_z - 0.55)
+			if dist < st["range"] + body_r and absf(a["fz"] + st["h"] * 0.5 - (eye_z - 0.3)) < 1.2:
+				_damage_player(st["dmg"] * (1.0 + 0.06 * (diff - 1)), a["pos"])
+				a["lunge"] = 0.25
+				a["cd"] = st["cd"] * rng.randf_range(1.6, 2.4)
+				a["mode"] = "climb"
+				a["mode_t"] = 1.2
+			elif a["mode_t"] <= 0.0:
+				a["mode"] = "climb"
+				a["mode_t"] = 0.8
+		"climb":
+			move = -dir + Vector2(-dir.y, dir.x) * 0.6
+			want_z = cruise_z + 0.6
+			if a["mode_t"] <= 0.0:
+				a["mode"] = "cruise"
+	# Keep apart from other flyers.
+	for b in aliens:
+		if b == a or b["dead"] or b["kind"] != "flyer":
+			continue
+		var off: Vector2 = a["pos"] - b["pos"]
+		var l := off.length()
+		if l < 0.8 and l > 0.001:
+			move += off / l * (0.8 - l) * 2.0
+	var step: Vector2 = move.limit_length(1.0) * speed * delta
+	var np: Vector2 = a["pos"] + step
+	np.x = clampf(np.x, 1.2, map.w - 1.2)
+	np.y = clampf(np.y, 1.2, map.h - 1.2)
+	# Never fly into a wall taller than you are: go up first.
+	if map.height_at(np) > a["fz"] - 0.1:
+		want_z = map.height_at(np) + 0.6
+		np = a["pos"]
+	if np.distance_to(pos) < body_r + 0.25:
+		np = a["pos"]
+	a["pos"] = np
+	a["fz"] = move_toward(a["fz"], want_z, delta * (4.0 if a["mode"] == "dive" else 2.5))
+	a["moving"] = true
+	a["face"] = lerp_angle(a["face"], step.angle() if step.length() > 0.0005 else dir.angle(), minf(1.0, delta * 6.0))
+
+
+func _update_burrower(a: Dictionary, delta: float) -> void:
+	## Underground: a mound of churned earth moving straight at you, under
+	## walls and all. Bullets can't reach it; rockets can. Close enough, it
+	## bursts out of the ground.
+	var st: Dictionary = a["st"]
+	var ground := map.height_at(a["pos"])
+	var to_p: Vector2 = pos - a["pos"]
+	var dist := to_p.length()
+	if a["sink"] > 0.0:
+		a["sink"] -= delta
+		a["fz"] = move_toward(a["fz"], ground - st["h"], delta * st["h"] / 0.8)
+		if a["sink"] <= 0.0:
+			a["under"] = true
+			a["dig_t"] = 0.0
+		return
+	if a["emerge"] > 0.0:
+		a["emerge"] -= delta
+		a["fz"] = move_toward(a["fz"], ground, delta * st["h"] / 0.5)
+		a["face"] = to_p.angle()
+		if a["emerge"] <= 0.0:
+			a["fz"] = ground
+			a["up_t"] = 0.0
+			a["cd"] = 0.4
+		return
+	a["fz"] = ground - st["h"]
+	if not a["awake"]:
+		a["moving"] = false
+		if dist < 10.0:
+			a["awake"] = true
+		return
+	_first_sighting("burrower")
+	a["dig_t"] += delta
+	var dir := to_p / maxf(dist, 0.001)
+	if dist > 1.2:
+		var np: Vector2 = a["pos"] + dir * st["dig"] * delta
+		np.x = clampf(np.x, 1.2, map.w - 1.2)
+		np.y = clampf(np.y, 1.2, map.h - 1.2)
+		a["pos"] = np
+	a["moving"] = true
+	a["face"] = dir.angle()
+	# Dirt kicked up along the way, and a rumble you can feel.
+	if fmod(a["anim"], 0.18) < delta:
+		explosions.append({"pos": a["pos"] - dir * 0.3, "z": ground + 0.1, "t": 0.0, "dur": 0.6, "size": 0.25, "col": Color(0.42, 0.32, 0.22), "smoke": true})
+	if fmod(a["anim"], 0.7) < delta and dist < 9.0:
+		Sfx.play("step", lerpf(-8.0, -22.0, dist / 9.0), 0.2, 0.45)
+		if dist < 4.0:
+			shake = maxf(shake, 3.0)
+	var stand_ok := not map.blocked(a["pos"], st["r"], ground) and absf(ground - floor_z) < 1.0
+	if (dist < 2.3 or a["dig_t"] > 14.0) and stand_ok:
+		_burrower_surface(a, true)
+
+
+func _burrower_surface(a: Dictionary, attack: bool) -> void:
+	a["under"] = false
+	a["emerge"] = 0.5
+	_dirt_burst(a["pos"], 6)
+	Sfx.play("boom", -8.0, 0.2, 0.6)
+	Sfx.play("screech", -4.0, 0.2, 0.7)
+	var d: float = a["pos"].distance_to(pos)
+	shake = maxf(shake, 14.0 * clampf(1.0 - d / 6.0, 0.2, 1.0))
+	if attack and d < 1.8:
+		_damage_player(a["st"]["dmg"] * 1.3, a["pos"])
+
+
+func _dirt_burst(p: Vector2, n: int) -> void:
+	var g := map.height_at(p)
+	for i in n:
+		var off := Vector2(rng.randf_range(-0.5, 0.5), rng.randf_range(-0.5, 0.5))
+		explosions.append({"pos": p + off, "z": g + rng.randf_range(0.1, 0.9), "t": -i * 0.04, "dur": 0.8, "size": 0.6, "col": Color(0.45, 0.34, 0.24), "smoke": true})
+
+
 func _update_hive(a: Dictionary, dist: float) -> void:
 	if dist < 12.0:
 		a["awake"] = true
@@ -927,7 +1133,7 @@ func _update_projectiles(delta: float) -> void:
 				if a["dead"]:
 					continue
 				var st: Dictionary = a["st"]
-				if a["pos"].distance_to(np) < st["r"] + 0.3 and z > a["fz"] - 0.1 and z < a["fz"] + st["h"] + 0.2:
+				if not a.get("under", false) and a["pos"].distance_to(np) < st["r"] + 0.3 and z > a["fz"] - 0.1 and z < a["fz"] + st["h"] + 0.2:
 					hit = true
 					break
 			if hit:
@@ -961,6 +1167,13 @@ func _explode_rocket(p: Vector2, z: float) -> void:
 			continue
 		var st: Dictionary = a["st"]
 		var dd: float = a["pos"].distance_to(p)
+		if a.get("under", false):
+			# The blast shakes diggers loose: it hurts and drives them up.
+			if dd < 2.4:
+				_damage_alien(a, GameState.rocket_damage() * 0.6 * (1.0 - dd / 2.4 * 0.5))
+				if not a["dead"]:
+					_burrower_surface(a, false)
+			continue
 		var dz: float = z - (a["fz"] + st["h"] * 0.5)
 		var d3 := sqrt(dd * dd + dz * dz)
 		if d3 < 1.9:
@@ -2184,13 +2397,30 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var rate := 7.0 if o["moving"] else 0.0
 				if nest:
 					rate = 2.0
+				var ground_z := map.height_at(o["pos"])
+				var cut := -1e9
+				if o["kind"] == "burrower" and not o["dead"] and (o["under"] or o["emerge"] > 0.0 or o["sink"] > 0.0):
+					# A mound of moving earth; while coming up, the body rises out of it.
+					var mt3: Texture2D = _view_frame("mound", o["face"], o["pos"], o["anim"] * 6.0)
+					var ml3: float = tex3d["mound"]["L"]
+					_billboard(mt3, sx, ty, ml3, ml3, ground_z - 0.15, tint.lerp(FOG, fog * 0.85), horizon, proj_scale, col_w)
+					if o["under"]:
+						continue
+					cut = ground_z
+				elif o["kind"] == "flyer":
+					rate = 14.0
 				var frame: Texture2D = _view_frame(o["kind"], o["face"], o["pos"], o["anim"] * rate)
 				var mod := tint.lerp(FOG, fog * 0.85)
 				var ww: float = lw * (1.0 + o["lunge"] * 0.25)
 				var hh: float = lw * (1.0 + o["lunge"] * 0.15)
 				var bob: float = absf(sin(o["anim"] * rate * PI * 0.5)) * 0.05 * lw if o["moving"] else 0.0
-				if not o["dead"]:
-					_draw_shadow(o["pos"], o["fz"], st["w"] * 0.45, horizon, proj_scale, fog, ty)
+				if o["kind"] == "flyer":
+					bob = sin(o["anim"] * 3.0 + o["seed"]) * 0.08
+				if not o["dead"] and cut < -1e8:
+					var sh_r: float = st["w"] * 0.45
+					if o["kind"] == "flyer":
+						sh_r *= clampf(1.0 - (o["fz"] - ground_z) * 0.12, 0.4, 1.0)
+					_draw_shadow(o["pos"], ground_z if o["kind"] == "flyer" else o["fz"], sh_r, horizon, proj_scale, fog, ty)
 				if o["dead"]:
 					var k: float = clampf(o["death_t"] / 0.6, 0.0, 1.0)
 					hh *= 1.0 - k
@@ -2199,7 +2429,7 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					mod.a = 1.0 - k
 				if o["flash"] > 0.0:
 					mod = Color(2.0, 2.0, 2.0)
-				_billboard(frame, sx, ty, ww, hh, o["fz"] + bob, mod, horizon, proj_scale, col_w)
+				_billboard(frame, sx, ty, ww, hh, o["fz"] + bob, mod, horizon, proj_scale, col_w, cut)
 				var rect := _body_rect(sx, ty, st["w"], st["h"], o["fz"], horizon, proj_scale)
 				if not o["dead"] and (_is_nest(o) or o["kind"] == "brute") and o["hp"] < o["max"] and rect.size.x > 6.0:
 					var bar := Rect2(rect.position.x, rect.position.y - 10.0, rect.size.x, 5.0)
@@ -2357,7 +2587,7 @@ func _body_rect(sx: float, ty: float, w: float, h: float, z: float, horizon: flo
 	return Rect2(sx - sw * 0.5, bottom - sh, sw, sh)
 
 
-func _billboard(t: Texture2D, sx: float, ty: float, ww: float, hh: float, z: float, mod: Color, horizon: float, proj_scale: float, col_w: float) -> Rect2:
+func _billboard(t: Texture2D, sx: float, ty: float, ww: float, hh: float, z: float, mod: Color, horizon: float, proj_scale: float, col_w: float, floor_cut := -1e9) -> Rect2:
 	## Draws a sprite standing on height z, one screen column at a time, cut
 	## off wherever nearer terrain covers it.
 	var sw := ww * proj_scale / ty
@@ -2369,13 +2599,17 @@ func _billboard(t: Texture2D, sx: float, ty: float, ww: float, hh: float, z: flo
 		return Rect2(left, top, sw, sh)
 	var tw := float(t.get_width())
 	var th := float(t.get_height())
+	# Anything below floor_cut (a digger still half in the ground) is hidden.
+	var floor_y := horizon + (eye_z - floor_cut) * proj_scale / ty if floor_cut > -1e8 else 1e9
+	if top >= floor_y:
+		return Rect2(left, top, sw, sh)
 	var c0 := maxi(int(floor(left / col_w)), 0)
 	var c1 := mini(int(ceil((left + sw) / col_w)), COLUMNS)
 	for c in range(c0, c1):
 		var clip := _clip_at(c, ty)
 		if top >= clip:
 			continue
-		var vis_bottom := minf(bottom, clip)
+		var vis_bottom := minf(minf(bottom, clip), floor_y)
 		var xa := maxf(c * col_w, left)
 		var xb := minf((c + 1) * col_w, left + sw)
 		if xb <= xa:
@@ -2707,6 +2941,14 @@ func _draw_minimap(w: float) -> void:
 		if _is_nest(a):
 			var pulse := 6.0 + 2.0 * sin(time * 4.0)
 			draw_rect(Rect2(p - Vector2(pulse, pulse), Vector2(pulse, pulse) * 2.0), Color(0.9, 0.3, 1.0))
+		elif a.get("under", false):
+			# Seismic contact: a pulsing ring.
+			if a["awake"]:
+				draw_arc(p, 3.0 + fmod(time * 8.0, 6.0), 0, TAU, 10, Color(0.9, 0.6, 0.3, 0.9), 1.5)
+		elif a["kind"] == "flyer":
+			var fv := Vector2.from_angle(a["face"])
+			var col := Color(1.0, 0.55, 0.2) if a["awake"] else Color(0.8, 0.55, 0.2)
+			draw_colored_polygon(PackedVector2Array([p + fv * 6.0, p + fv.rotated(2.4) * 5.0, p + fv.rotated(-2.4) * 5.0]), col)
 		else:
 			draw_circle(p, 3.5 if a["kind"] != "brute" else 5.5, Color(1.0, 0.25, 0.2) if a["awake"] else Color(0.8, 0.55, 0.2))
 	var mpulse := 0.5 + 0.5 * sin(time * 5.0)
