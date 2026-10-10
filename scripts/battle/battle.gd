@@ -29,7 +29,16 @@ const GROUND_TOP := Color(0.27, 0.15, 0.13)
 const PLATFORM_TOP := Color(0.36, 0.36, 0.39)
 
 # --- Controls -----------------------------------------------------------------
-const PLAYER_R := 0.3
+const MECH_R := LevelMap.MECH_R
+const PILOT_R := 0.15
+const PILOT_EYE := 0.55
+const PILOT_MAX_HP := 40.0
+const PILOT_WALK := 2.2
+const PILOT_RUN := 3.8
+const PILOT_STEP := 0.55
+const BOARD_DIST := 1.6
+const CLIMB_TIME := 1.3
+const CARBINE_DMG := 8.0
 const KEY_TURN_SPEED := 2.4
 const LOOK_SENS := 0.0065
 const PITCH_SENS := 0.9       ## screen pixels of look per pixel of finger drag
@@ -59,6 +68,24 @@ var angle := 0.0
 var floor_z := 0.0            ## height of the ground under the mech (smoothed)
 var eye_z := EYE
 var falling := false
+var body_r := MECH_R          ## collision radius of whatever you're in
+var eye_h := EYE              ## eye height above the ground under you
+var on_foot := false
+var mech_pos := Vector2()     ## where the empty mech is parked
+var mech_angle := 0.0
+var mech_fz := 0.0
+var pilot_hp := PILOT_MAX_HP
+var pilot_down := false
+var climb_t := 0.0            ## > 0 while climbing out of or into the mech
+var climb_out := true
+var climb_from := {}
+var climb_to := {}
+var caches: Array = []
+var caches_found := 0
+var bonus_credits := 0
+var bonus_salvage := 0
+var running := false
+var told_foot := false
 var parts := {}
 var aliens: Array = []
 var props: Array = []
@@ -148,6 +175,9 @@ func _ready() -> void:
 	for sp in map.prop_spots:
 		props.append({"pos": sp, "z": map.height_at(sp), "kind": "crystal" if rng.randf() < 0.3 else "rock"})
 
+	for sp in map.cache_spots:
+		caches.append({"pos": sp, "z": map.height_at(sp), "taken": false, "anim": rng.randf() * 3.0})
+
 	_build_backdrop()
 	col_events.resize(COLUMNS)
 	for c in COLUMNS:
@@ -210,10 +240,13 @@ func _process(delta: float) -> void:
 	time += delta
 	var vh := get_viewport_rect().size.y
 	pitch = clampf(pitch, -vh * PITCH_LIMIT, vh * PITCH_LIMIT)
-	horizon_y = vh * 0.5 + pitch + sin(bob_t * 2.0) * 7.0 * bob_amount
+	horizon_y = vh * 0.5 + pitch + sin(bob_t * 2.0) * (11.0 if on_foot else 7.0) * bob_amount
 	if state == State.PLAYING:
-		_update_player(delta)
-		_update_weapons(delta)
+		if climb_t > 0.0:
+			_update_climb(delta)
+		else:
+			_update_player(delta)
+			_update_weapons(delta)
 		flow_timer -= delta
 		if flow_timer <= 0.0:
 			_update_flow()
@@ -252,13 +285,18 @@ func _update_player(delta: float) -> void:
 	var right := Vector2(-dir.y, dir.x)
 	var inp := (dir * fwd + right * strafe).limit_length(1.0)
 	var speed := GameState.walk_speed() * _legs_factor()
+	var step_h := LevelMap.STEP
+	if on_foot:
+		running = move_vec.length() > 0.85 or Input.is_physical_key_pressed(KEY_SHIFT)
+		speed = PILOT_RUN if running else PILOT_WALK
+		step_h = PILOT_STEP
 	var mv := inp * speed * delta
 	var stand := map.height_at(pos)
 	var nx := pos + Vector2(mv.x, 0.0)
-	if not map.blocked(nx, PLAYER_R, stand):
+	if not map.blocked(nx, body_r, stand, step_h) and not _parked_mech_blocks(nx, body_r):
 		pos = nx
 	var ny := pos + Vector2(0.0, mv.y)
-	if not map.blocked(ny, PLAYER_R, stand):
+	if not map.blocked(ny, body_r, stand, step_h) and not _parked_mech_blocks(ny, body_r):
 		pos = ny
 
 	# Climb steps smoothly; drop off ledges with a heavy landing.
@@ -273,7 +311,9 @@ func _update_player(delta: float) -> void:
 		falling = false
 		shake = maxf(shake, 12.0)
 		Sfx.play("step", -1.0)
-	eye_z = floor_z + EYE
+	eye_z = floor_z + eye_h
+	if on_foot:
+		_check_caches()
 
 	var moving := inp.length()
 	bob_amount = lerpf(bob_amount, moving, minf(1.0, delta * 6.0))
@@ -281,8 +321,11 @@ func _update_player(delta: float) -> void:
 		var prev := bob_t
 		bob_t += delta * speed * 2.2
 		if floor(prev / PI) != floor(bob_t / PI):
-			Sfx.play("step", -7.0)
-			shake = maxf(shake, 3.0)
+			if on_foot:
+				Sfx.play("step", -15.0 if not running else -12.0, 0.1, 1.9)
+			else:
+				Sfx.play("step", -7.0)
+				shake = maxf(shake, 3.0)
 
 
 func _legs_factor() -> float:
@@ -300,8 +343,11 @@ func _update_weapons(delta: float) -> void:
 	locked_target = _find_target(Vector2.ZERO)
 	var firing := fire_touch >= 0 or Input.is_physical_key_pressed(KEY_SPACE)
 	if firing and fire_cd <= 0.0:
-		_fire_cannon()
-	if Input.is_physical_key_pressed(KEY_R) or Input.is_physical_key_pressed(KEY_F):
+		if on_foot:
+			_fire_carbine()
+		else:
+			_fire_cannon()
+	if not on_foot and (Input.is_physical_key_pressed(KEY_R) or Input.is_physical_key_pressed(KEY_F)):
 		_fire_rocket()
 
 
@@ -321,14 +367,27 @@ func _fire_cannon() -> void:
 	shake = maxf(shake, 1.5)
 	Sfx.play("gun", -5.0)
 
+	_shoot(Vector2(rng.randf_range(-6.0, 6.0), rng.randf_range(-6.0, 6.0)), GameState.cannon_damage(), g)
+
+
+func _fire_carbine() -> void:
+	fire_cd = 0.16
+	muzzle[0] = 0.05
+	recoil[0] = 1.0
+	shake = maxf(shake, 0.8)
+	Sfx.play("gun", -9.0, 0.05, 1.7)
+	_shoot(Vector2(rng.randf_range(-4.0, 4.0), rng.randf_range(-4.0, 4.0)), CARBINE_DMG, 2)
+
+
+func _shoot(spread: Vector2, damage: float, g: int) -> void:
+	## One hitscan shot along the crosshair. g: 0/1 = mech arms, 2 = carbine.
 	# The shot goes exactly where the crosshair points (screen centre),
 	# with a few pixels of random spread.
-	var spread := Vector2(rng.randf_range(-6.0, 6.0), rng.randf_range(-6.0, 6.0))
 	var target = _find_target(spread)
 	var hit_point: Vector2
 	var hit_z := eye_z
 	if target != null:
-		_damage_alien(target, GameState.cannon_damage())
+		_damage_alien(target, damage)
 		var tp: Vector2 = target["pos"]
 		hit_point = tp - (tp - pos).normalized() * 0.2
 		hit_z = _aim_height_at(spread, Vector2.from_angle(angle).dot(hit_point - pos))
@@ -345,7 +404,7 @@ func _fire_cannon() -> void:
 
 
 func _fire_rocket() -> void:
-	if rocket_cd > 0.0 or state != State.PLAYING:
+	if rocket_cd > 0.0 or state != State.PLAYING or on_foot or climb_t > 0.0:
 		return
 	rocket_cd = GameState.rocket_cooldown()
 	var dir := Vector2.from_angle(angle)
@@ -498,6 +557,13 @@ func _damage_player(amount: float, src: Vector2) -> void:
 	if state != State.PLAYING:
 		return
 	var rel := wrapf((src - pos).angle() - angle, -PI, PI)
+	if on_foot:
+		pilot_hp = maxf(0.0, pilot_hp - amount)
+		hit_flash = 0.3
+		shake = maxf(shake, 6.0)
+		dmg_indicators.append({"rel": rel, "t": 0.9})
+		Sfx.play("hit", -7.0, 0.1, 1.5)
+		return
 	var r := rng.randf()
 	var part := "torso"
 	if absf(rel) > 2.2:
@@ -603,7 +669,7 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 			a["cd"] = st["cd"] * rng.randf_range(0.8, 1.3)
 			a["lunge"] = 0.2
 			Sfx.play("splat", -12.0, 0.3)
-	elif los and same_level and dist < st["range"] + PLAYER_R + 0.1:
+	elif los and same_level and dist < st["range"] + body_r + 0.1:
 		if a["cd"] <= 0.0:
 			_damage_player(st["dmg"] * dmg_mul, a["pos"])
 			a["cd"] = st["cd"]
@@ -626,10 +692,10 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 	var r: float = st["r"]
 	var stand := map.height_at(a["pos"])
 	var nx: Vector2 = a["pos"] + Vector2(step.x, 0.0)
-	if not map.blocked(nx, r, stand) and nx.distance_to(pos) > r + PLAYER_R:
+	if not map.blocked(nx, r, stand) and nx.distance_to(pos) > r + body_r and not _parked_mech_blocks(nx, r):
 		a["pos"] = nx
 	var ny: Vector2 = a["pos"] + Vector2(0.0, step.y)
-	if not map.blocked(ny, r, stand) and ny.distance_to(pos) > r + PLAYER_R:
+	if not map.blocked(ny, r, stand) and ny.distance_to(pos) > r + body_r and not _parked_mech_blocks(ny, r):
 		a["pos"] = ny
 
 
@@ -686,7 +752,7 @@ func _update_projectiles(delta: float) -> void:
 				explosions.append({"pos": pr["pos"], "z": maxf(z, ground), "t": 0.0, "dur": 0.3, "size": 0.35, "col": Color(0.6, 1.0, 0.2)})
 				pr["life"] = -1.0
 				continue
-			if np.distance_to(pos) < PLAYER_R + 0.15 and z > floor_z - 0.2 and z < eye_z + 0.5:
+			if np.distance_to(pos) < body_r + 0.15 and z > floor_z - 0.2 and z < eye_z + 0.5:
 				_damage_player(pr["dmg"], pr["src"])
 				pr["life"] = -1.0
 				continue
@@ -734,7 +800,13 @@ func _update_effects(delta: float) -> void:
 
 
 func _check_end() -> void:
-	if parts["torso"] <= 0.0:
+	if on_foot and pilot_hp <= 0.0:
+		pilot_down = true
+		state = State.LOST
+		Sfx.play("alarm", 0.0, 0.0)
+		shake = 10.0
+		_finish()
+	elif parts["torso"] <= 0.0:
 		state = State.LOST
 		explosions.append({"pos": pos + Vector2.from_angle(angle) * 0.6, "z": eye_z - 0.6, "t": 0.0, "dur": 1.0, "size": 1.5, "col": Color(1.0, 0.5, 0.2)})
 		Sfx.play("boom", 2.0)
@@ -762,7 +834,148 @@ func _finish() -> void:
 		"hives_destroyed": hives_destroyed,
 		"hives_total": hives_total,
 		"parts": parts.duplicate(),
+		"bonus_credits": bonus_credits,
+		"bonus_salvage": bonus_salvage,
+		"caches": caches_found,
+		"pilot_down": pilot_down,
 	})
+
+
+# --- Climbing out of and into the mech ----------------------------------------
+
+func _parked_mech_blocks(p: Vector2, r: float) -> bool:
+	return on_foot and p.distance_to(mech_pos) < MECH_R + r
+
+
+func _check_caches() -> void:
+	for c in caches:
+		if c["taken"]:
+			continue
+		if pos.distance_to(c["pos"]) < 0.55 and absf(floor_z - c["z"]) < 0.6:
+			c["taken"] = true
+			caches_found += 1
+			bonus_credits += 40
+			bonus_salvage += 1
+			Sfx.play("pickup", -2.0, 0.0)
+			_show_msg("SALVAGE CACHE  +40 CR  +1 SALVAGE", 2.0)
+
+
+func _toggle_mech() -> void:
+	if state != State.PLAYING or climb_t > 0.0:
+		return
+	if on_foot:
+		_start_board()
+	else:
+		_start_exit()
+
+
+func _can_board() -> int:
+	## 0 = can climb in, 1 = too far, 2 = not behind it, 3 = wrong level.
+	var to_mech := mech_pos - pos
+	if to_mech.length() > BOARD_DIST:
+		return 1
+	if absf(floor_z - mech_fz) > 1.0:
+		return 3
+	if (pos - mech_pos).normalized().dot(-Vector2.from_angle(mech_angle)) < 0.25:
+		return 2
+	return 0
+
+
+func _start_exit() -> void:
+	var fwd := Vector2.from_angle(angle)
+	var side := Vector2(-fwd.y, fwd.x)
+	var here := map.height_at(pos)
+	var spot := Vector2.INF
+	for off in [-fwd * 0.95, -fwd * 0.95 + side * 0.45, -fwd * 0.95 - side * 0.45, -fwd * 0.75 + side * 0.8, -fwd * 0.75 - side * 0.8, side * 0.95, -side * 0.95]:
+		var p: Vector2 = pos + off
+		var hh := map.height_at(p)
+		if not map.blocked(p, PILOT_R, hh, PILOT_STEP) and absf(hh - here) <= 1.2:
+			spot = p
+			break
+	if spot == Vector2.INF:
+		_show_msg("NO ROOM BEHIND THE MECH TO CLIMB OUT", 1.5)
+		return
+	mech_pos = pos
+	mech_angle = angle
+	mech_fz = floor_z
+	climb_out = true
+	climb_from = {"pos": pos, "floor": floor_z, "eye": EYE, "angle": angle}
+	climb_to = {"pos": spot, "floor": map.height_at(spot), "eye": PILOT_EYE, "angle": angle}
+	climb_t = CLIMB_TIME
+	_stop_inputs()
+	Sfx.play("hatch", -3.0, 0.0)
+
+
+func _start_board() -> void:
+	match _can_board():
+		1:
+			_show_msg("GET CLOSER TO YOUR MECH", 1.2)
+			return
+		2:
+			_show_msg("CLIMB IN FROM THE MECH'S BACK", 1.5)
+			return
+		3:
+			_show_msg("GET LEVEL WITH YOUR MECH", 1.5)
+			return
+	climb_out = false
+	climb_from = {"pos": pos, "floor": floor_z, "eye": PILOT_EYE, "angle": angle}
+	climb_to = {"pos": mech_pos, "floor": mech_fz, "eye": EYE, "angle": mech_angle}
+	climb_t = CLIMB_TIME
+	_stop_inputs()
+	Sfx.play("hatch", -3.0, 0.0)
+
+
+func _stop_inputs() -> void:
+	fire_touch = -1
+	move_touch = -1
+	look_touch = -1
+	move_vec = Vector2.ZERO
+
+
+func _climb_progress() -> float:
+	return clampf(1.0 - climb_t / CLIMB_TIME, 0.0, 1.0)
+
+
+func _update_climb(delta: float) -> void:
+	climb_t -= delta
+	var t := _climb_progress()
+	var e := smoothstep(0.0, 1.0, t)
+	var from_pos: Vector2 = climb_from["pos"]
+	pos = from_pos.lerp(climb_to["pos"], e)
+	floor_z = lerpf(climb_from["floor"], climb_to["floor"], e)
+	eye_h = lerpf(climb_from["eye"], climb_to["eye"], e) + sin(t * PI) * 0.3
+	angle = lerp_angle(climb_from["angle"], climb_to["angle"], e)
+	eye_z = floor_z + eye_h
+	bob_amount = 0.0
+	if climb_t > 0.0:
+		return
+	climb_t = 0.0
+	if climb_out:
+		on_foot = true
+		body_r = PILOT_R
+		eye_h = PILOT_EYE
+		Sfx.play("step", -8.0, 0.1, 1.6)
+		if not told_foot:
+			told_foot = true
+			_show_msg("ON FOOT — FIND CACHES WHERE THE MECH CAN'T FIT", 3.0)
+	else:
+		on_foot = false
+		body_r = MECH_R
+		eye_h = EYE
+		pos = mech_pos
+		angle = mech_angle
+		floor_z = mech_fz
+		eye_z = floor_z + eye_h
+		Sfx.play("step", -2.0)
+		shake = 6.0
+	_update_flow()
+
+
+func _in_cockpit_view() -> bool:
+	if climb_t > 0.0:
+		var t := _climb_progress()
+		return (climb_out and t < 0.45) or (not climb_out and t > 0.55)
+	return not on_foot
 
 
 func _show_msg(text: String, dur: float) -> void:
@@ -778,6 +991,8 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if state != State.PLAYING and end_time > 1.0 and event.keycode in [KEY_SPACE, KEY_ENTER, KEY_ESCAPE]:
 			get_tree().change_scene_to_file("res://scenes/hangar.tscn")
+		elif state == State.PLAYING and event.keycode == KEY_X:
+			_toggle_mech()
 		return
 	if event is InputEventScreenTouch:
 		var p: Vector2 = event.position
@@ -795,10 +1010,15 @@ func _input(event: InputEvent) -> void:
 					retreat_armed = 2.5
 					Sfx.play("click")
 				return
+			if _mech_button_rect(s).has_point(p):
+				_toggle_mech()
+				return
+			if climb_t > 0.0:
+				return
 			if p.distance_to(_fire_center(s)) < FIRE_R * 1.2:
 				fire_touch = event.index
 				return
-			if p.distance_to(_rocket_center(s)) < ROCKET_R * 1.25:
+			if not on_foot and p.distance_to(_rocket_center(s)) < ROCKET_R * 1.25:
 				_fire_rocket()
 				return
 			if p.x < s.x * 0.45:
@@ -818,7 +1038,7 @@ func _input(event: InputEvent) -> void:
 				look_touch = -1
 			if event.index == fire_touch:
 				fire_touch = -1
-	elif event is InputEventScreenDrag and state == State.PLAYING:
+	elif event is InputEventScreenDrag and state == State.PLAYING and climb_t <= 0.0:
 		if event.index == move_touch:
 			var v: Vector2 = (event.position - move_origin) / JOY_RADIUS
 			move_vec = v.limit_length(1.0) if v.length() > 0.12 else Vector2.ZERO
@@ -845,6 +1065,10 @@ func _retreat_rect() -> Rect2:
 	return Rect2(16, 16, 150, 46)
 
 
+func _mech_button_rect(s: Vector2) -> Rect2:
+	return Rect2(s.x - 206, 236, 190, 50)
+
+
 # =============================================================================
 # Drawing
 # =============================================================================
@@ -863,9 +1087,15 @@ func _draw() -> void:
 	_draw_world(w, h, horizon, proj_scale)
 	_draw_sprites(w, h, horizon, proj_scale)
 	_draw_tracers(w, h, horizon, proj_scale)
-	_draw_guns(w, h)
-	_draw_cockpit(w, h)
+	if _in_cockpit_view():
+		_draw_guns(w, h)
+		_draw_cockpit(w, h)
+	elif climb_t <= 0.0:
+		_draw_pilot_gun(w, h)
+		_draw_visor(w, h)
 	_draw_hud(w, h, horizon, proj_scale)
+	if climb_t > 0.0:
+		_draw_climb_overlay(w, h)
 
 	draw_set_transform(Vector2.ZERO)
 	if state == State.PLAYING:
@@ -1117,6 +1347,16 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 		var pr := _project(p["pos"])
 		if pr.y > 0.15 and pr.y < MAX_VIEW:
 			items.append([pr.y, 2, p, pr.x])
+	for cc in caches:
+		if cc["taken"]:
+			continue
+		var pr := _project(cc["pos"])
+		if pr.y > 0.15 and pr.y < MAX_VIEW:
+			items.append([pr.y, 4, cc, pr.x])
+	if not _in_cockpit_view():
+		var pr := _project(mech_pos)
+		if pr.y > 0.15 and pr.y < MAX_VIEW:
+			items.append([pr.y, 5, {}, pr.x])
 	for e in explosions:
 		if e["t"] < 0.0:
 			continue
@@ -1177,6 +1417,16 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					var r2 := clampf(0.14 * proj_scale / ty, 2.0, 60.0)
 					draw_circle(Vector2(sx, cy), r2 * 1.8, Color(0.5, 1.0, 0.1, 0.3))
 					draw_circle(Vector2(sx, cy), r2, Color(0.75, 1.0, 0.3))
+			4:
+				var cf: Array = tex["cache"]
+				var ct: Texture2D = cf[int(time * 3.0 + o["anim"]) % cf.size()]
+				_billboard(ct, sx, ty, 0.6, 0.6, o["z"], Color.WHITE.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+			5:
+				var from_behind := (pos - mech_pos).dot(Vector2.from_angle(mech_angle)) < 0.0
+				var mt: Texture2D = tex["mech_back" if from_behind else "mech_front"][0]
+				var mrect := _billboard(mt, sx, ty, 1.6, 2.1, mech_fz, Color.WHITE.lerp(FOG, fog * 0.85), horizon, proj_scale, col_w)
+				if on_foot and climb_t <= 0.0 and _can_board() == 0 and fmod(time, 0.8) < 0.5:
+					_draw_brackets(mrect, Color(0.4, 1.0, 0.6))
 			3:
 				var cy2: float = horizon + (eye_z - o["z"]) * proj_scale / ty
 				if cy2 >= _clip_at(c, ty + 0.3):
@@ -1236,7 +1486,69 @@ func _draw_brackets(r: Rect2, c: Color) -> void:
 		draw_line(corner, corner + Vector2(0, l * syn), c, 2.0)
 
 
+func _carbine_geom(w: float, h: float) -> Array:
+	## [grip end, barrel end, muzzle] of the pilot's carbine on screen.
+	var sway := Vector2(sin(bob_t) * 12.0, absf(cos(bob_t)) * 9.0) * bob_amount
+	var rec: float = recoil[0]
+	var base := Vector2(w * 0.74, h * 1.06) + sway + Vector2(rec * 6.0, rec * 16.0)
+	var tip := Vector2(w * 0.6, h * 0.76) + sway * 0.6 + Vector2(rec * 3.0, rec * 8.0)
+	var dir := (tip - base).normalized()
+	return [base, tip, tip + dir * 34.0]
+
+
+func _draw_pilot_gun(w: float, h: float) -> void:
+	var g := _carbine_geom(w, h)
+	var base: Vector2 = g[0]
+	var tip: Vector2 = g[1]
+	var muz: Vector2 = g[2]
+	var dir := (tip - base).normalized()
+	var n := Vector2(-dir.y, dir.x)
+	# Gloved hand and sleeve
+	var grip := base.lerp(tip, 0.3)
+	draw_colored_polygon(PackedVector2Array([Vector2(w + 20, h + 20), Vector2(w * 0.8, h + 20), grip - n * 20 + dir * 10, grip + n * 30 - dir * 10]), Color(0.22, 0.25, 0.2))
+	draw_circle(grip + n * 4, 26.0, Color(0.15, 0.13, 0.11))
+	# Gun body, magazine, barrel and sight
+	draw_colored_polygon(PackedVector2Array([base + n * 30, base - n * 26, tip - n * 12, tip + n * 14]), Color(0.2, 0.21, 0.23))
+	draw_polyline(PackedVector2Array([base + n * 30, tip + n * 14, tip - n * 12]), Color(0.38, 0.4, 0.43), 2.0)
+	var mag := base.lerp(tip, 0.45)
+	draw_colored_polygon(PackedVector2Array([mag - n * 14, mag - n * 14 + dir * 22, mag - n * 52 + dir * 16, mag - n * 50 - dir * 4]), Color(0.14, 0.14, 0.15))
+	draw_line(tip, muz, Color(0.1, 0.1, 0.11), 10.0)
+	var sight := base.lerp(tip, 0.7) + n * 16
+	draw_rect(Rect2(sight - Vector2(5, 9), Vector2(10, 9)), Color(0.12, 0.12, 0.13))
+	draw_circle(sight + Vector2(0, -4), 2.0, Color(0.4, 1.0, 0.6))
+	if muzzle[0] > 0.0:
+		draw_circle(muz + dir * 10.0, 22.0, Color(1.0, 0.75, 0.3, 0.55))
+		draw_circle(muz + dir * 6.0, 11.0, Color(1.0, 0.97, 0.8))
+
+
+func _draw_visor(w: float, h: float) -> void:
+	# Helmet visor edges.
+	var c := Color(0.02, 0.03, 0.03, 0.85)
+	draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w + 40, -40), Vector2(w + 40, h * 0.06), Vector2(w * 0.75, h * 0.02), Vector2(w * 0.25, h * 0.02), Vector2(-40, h * 0.06)]), c)
+	draw_colored_polygon(PackedVector2Array([Vector2(-40, -40), Vector2(w * 0.04, -40), Vector2(-40, h * 0.3)]), c)
+	draw_colored_polygon(PackedVector2Array([Vector2(w + 40, -40), Vector2(w * 0.96, -40), Vector2(w + 40, h * 0.3)]), c)
+	draw_line(Vector2(w * 0.25, h * 0.02), Vector2(w * 0.75, h * 0.02), Color(0.4, 1.0, 0.6, 0.25), 2.0)
+	if hit_flash > 0.0:
+		draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(1, 0.1, 0.05, hit_flash * 0.8))
+	if pilot_hp < PILOT_MAX_HP * 0.35:
+		var pulse := 0.15 + 0.12 * sin(time * 7.0)
+		draw_rect(Rect2(-40, -40, w + 80, 60), Color(1, 0, 0, pulse))
+		draw_rect(Rect2(-40, h - 20, w + 80, 60), Color(1, 0, 0, pulse))
+
+
+func _draw_climb_overlay(w: float, h: float) -> void:
+	var t := _climb_progress()
+	var a := sin(t * PI) * 0.92
+	draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(0.0, 0.0, 0.0, a))
+	# Hatch frame sliding past
+	var off := (t - 0.5) * h * (1.0 if climb_out else -1.0)
+	draw_rect(Rect2(w * 0.2, h * 0.5 + off - 6.0, w * 0.6, 12.0), Color(0.5, 0.5, 0.45, a * 0.8))
+	_text("CLIMBING OUT…" if climb_out else "CLIMBING IN…", Vector2(w * 0.5, h * 0.45), 30, Color(0.4, 1.0, 0.6, a))
+
+
 func _muzzle_pos(g: int, w: float, h: float) -> Vector2:
+	if g == 2:
+		return _carbine_geom(w, h)[2]
 	var tip := Vector2(w * 0.3, h * 0.77) if g == 0 else Vector2(w * 0.7, h * 0.77)
 	var base := Vector2(w * 0.12, h * 1.04) if g == 0 else Vector2(w * 0.88, h * 1.04)
 	return tip.lerp(base, recoil[g] * 0.08)
@@ -1329,13 +1641,14 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	for sgn in [-1.0, 1.0]:
 		draw_line(Vector2(w * 0.5 + sgn * 70.0, horizon), Vector2(w * 0.5 + sgn * 120.0, horizon), Color(0.4, 1.0, 0.6, 0.45), 2.0)
 	var ch_col := Color(1.0, 0.3, 0.2) if locked else hud
-	draw_arc(cc, 22.0, 0, TAU, 32, ch_col, 2.0)
+	var ch_r := 12.0 if on_foot else 22.0
+	draw_arc(cc, ch_r, 0, TAU, 32, ch_col, 2.0)
 	for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
-		draw_line(cc + d * 10.0, cc + d * 30.0, ch_col, 2.0)
+		draw_line(cc + d * ch_r * 0.45, cc + d * ch_r * 1.35, ch_col, 2.0)
 	draw_circle(cc, 2.0, ch_col)
 
 	# Objective bar
-	var obj := "MISSION %d    HIVES %d/%d    KILLS %d" % [mission_no, hives_destroyed, hives_total, kills]
+	var obj := "MISSION %d    HIVES %d/%d    KILLS %d    CACHES %d/%d" % [mission_no, hives_destroyed, hives_total, kills, caches_found, caches.size()]
 	_text(obj, Vector2(w * 0.5, h * 0.06), 22, hud)
 
 	# Retreat button
@@ -1352,8 +1665,44 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	for p in GameState.PARTS:
 		ratios[p] = parts[p] / GameState.max_hp(p)
 	MechDiagram.draw_mech(self, panel.get_center() + Vector2(0, -2), 1.1, ratios, fmod(time, 0.6) < 0.3)
+	if on_foot:
+		_text("MECH PARKED", Vector2(panel.get_center().x, panel.end.y - 6.0), 14, Color(1.0, 0.85, 0.3))
+		var pb := Rect2(16, panel.end.y + 8.0, 150, 18)
+		var ratio := pilot_hp / PILOT_MAX_HP
+		draw_rect(pb, Color(0, 0, 0, 0.6))
+		draw_rect(Rect2(pb.position, Vector2(pb.size.x * ratio, pb.size.y)), MechDiagram.part_color(ratio))
+		draw_rect(pb, hud, false, 1.0)
+		_text("PILOT %d/%d" % [int(ceil(pilot_hp)), int(PILOT_MAX_HP)], pb.get_center() + Vector2(0, 6), 14, Color.WHITE)
 
 	_draw_minimap(w)
+
+	# Climb out / climb in button
+	if state == State.PLAYING:
+		var mb := _mech_button_rect(Vector2(w, h))
+		var label := "EXIT MECH"
+		var lit := true
+		if on_foot:
+			match _can_board():
+				0: label = "CLIMB IN"
+				1:
+					label = "BOARD (GO TO MECH)"
+					lit = false
+				2:
+					label = "GO TO ITS BACK"
+					lit = false
+				3:
+					label = "BOARD (GET LEVEL)"
+					lit = false
+		var glow := lit and on_foot and fmod(time, 0.8) < 0.4
+		draw_rect(mb, Color(0.1, 0.3, 0.15, 0.9) if glow else Color(0.05, 0.08, 0.07, 0.85))
+		draw_rect(mb, hud if lit else Color(0.3, 0.45, 0.35), false, 2.0)
+		_text(label, mb.get_center() + Vector2(0, 7), 17, hud if lit else Color(0.5, 0.65, 0.55))
+
+	if on_foot:
+		var fy := h * 0.955
+		_text("CARBINE    " + ("RUNNING" if running else "PUSH STICK ALL THE WAY TO RUN"), Vector2(w * 0.5, fy), 17, hud)
+		_draw_hud_messages(w, h, cc)
+		return
 
 	# Weapon status on the console
 	var cy := h * 0.955
@@ -1366,12 +1715,18 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	draw_rect(bar, hud, false, 1.0)
 	_text("ROCKETS READY" if rk_ready >= 1.0 else "RELOADING", bar.get_center() + Vector2(0, 30), 14, hud)
 
+	_draw_hud_messages(w, h, cc)
+
+
+func _draw_hud_messages(w: float, h: float, cc: Vector2) -> void:
 	# Messages
 	if msg_t > 0.0 and state == State.PLAYING:
 		var a := clampf(msg_t, 0.0, 1.0)
 		_text(msg, Vector2(w * 0.5, h * 0.24), 30, Color(1.0, 0.85, 0.3, a))
-	if parts["torso"] / GameState.max_hp("torso") < 0.3 and state == State.PLAYING and fmod(time, 0.8) < 0.5:
+	if not on_foot and parts["torso"] / GameState.max_hp("torso") < 0.3 and state == State.PLAYING and fmod(time, 0.8) < 0.5:
 		_text("HULL CRITICAL", Vector2(w * 0.5, h * 0.15), 26, Color(1, 0.2, 0.15))
+	if on_foot and pilot_hp < PILOT_MAX_HP * 0.35 and state == State.PLAYING and fmod(time, 0.8) < 0.5:
+		_text("PILOT BADLY HURT — GET BACK IN THE MECH", Vector2(w * 0.5, h * 0.15), 24, Color(1, 0.2, 0.15))
 
 	# Hit direction markers
 	for d in dmg_indicators:
@@ -1431,6 +1786,22 @@ func _draw_minimap(w: float) -> void:
 			draw_rect(Rect2(p - Vector2(pulse, pulse), Vector2(pulse, pulse) * 2.0), Color(0.9, 0.3, 1.0))
 		else:
 			draw_circle(p, 3.5 if a["kind"] != "brute" else 5.5, Color(1.0, 0.25, 0.2) if a["awake"] else Color(0.8, 0.55, 0.2))
+	for cc in caches:
+		if cc["taken"]:
+			continue
+		var crel: Vector2 = cc["pos"] - pos
+		if absf(crel.x) < radius - 0.3 and absf(crel.y) < radius - 0.3:
+			draw_rect(Rect2(center + crel * cs - Vector2(3, 3), Vector2(6, 6)), Color(1.0, 0.85, 0.2))
+	if on_foot:
+		var mrel := mech_pos - pos
+		var mp := center + mrel * cs
+		if absf(mrel.x) < radius - 0.3 and absf(mrel.y) < radius - 0.3:
+			draw_circle(mp, 6.0, Color(0.4, 1.0, 0.6))
+			draw_line(mp, mp + Vector2.from_angle(mech_angle) * 10.0, Color(0.4, 1.0, 0.6), 2.0)
+		else:
+			var mv := mrel.normalized()
+			var me := center + mv * (mm.size.x * 0.5 - 8.0)
+			draw_circle(me, 6.0, Color(0.4, 1.0, 0.6))
 	# Off-screen hive arrows so the player always knows where to go.
 	for a in aliens:
 		if a["dead"] or a["kind"] != "hive":
@@ -1465,6 +1836,8 @@ func _draw_touch_controls(w: float, h: float) -> void:
 	draw_arc(fc, FIRE_R, 0, TAU, 48, Color(1, 0.5, 0.4, 0.8), 3.0)
 	_text("FIRE", fc + Vector2(0, 9), 26, Color(1, 1, 1, 0.85))
 
+	if on_foot or climb_t > 0.0:
+		return
 	var rc := _rocket_center(Vector2(w, h))
 	var rk_ready := clampf(1.0 - rocket_cd / GameState.rocket_cooldown(), 0.0, 1.0)
 	draw_circle(rc, ROCKET_R, Color(1.0, 0.55, 0.1, 0.4 if rk_ready >= 1.0 else 0.15))
@@ -1478,7 +1851,7 @@ func _draw_end_screen(w: float, h: float) -> void:
 	var title := "HIVES DESTROYED"
 	var col := Color(0.4, 1.0, 0.6)
 	if state == State.LOST:
-		title = "MECH DOWN"
+		title = "PILOT DOWN" if pilot_down else "MECH DOWN"
 		col = Color(1.0, 0.3, 0.2)
 	elif state == State.RETREATED:
 		title = "RETREATED"
@@ -1489,10 +1862,11 @@ func _draw_end_screen(w: float, h: float) -> void:
 	var lines := [
 		"Aliens killed: %d" % kills,
 		"Hives destroyed: %d / %d" % [hives_destroyed, hives_total],
+		"Salvage caches found: %d / %d" % [caches_found, caches.size()],
 		"Credits earned: +%d     Salvage: +%d" % [r.get("credits", 0), r.get("salvage", 0)],
 	]
 	if state == State.LOST:
-		lines.append("The recovery crew dragged your mech back to the hangar.")
+		lines.append("The recovery crew dragged you and your mech back to the hangar." if pilot_down else "The recovery crew dragged your mech back to the hangar.")
 	for i in lines.size():
 		_text(lines[i], Vector2(w * 0.5, h * 0.48 + i * 38), 24, Color(1, 1, 1, k))
 	if end_time > 1.2:

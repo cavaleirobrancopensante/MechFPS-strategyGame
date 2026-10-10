@@ -13,6 +13,9 @@ static func build_all() -> Dictionary:
 		"hive": [_hive(0), _hive(1)],
 		"rock": [_rock()],
 		"crystal": [_crystal()],
+		"mech_front": [_mech(false)],
+		"mech_back": [_mech(true)],
+		"cache": [_cache(0), _cache(1)],
 	}
 
 
@@ -97,6 +100,64 @@ static func _hive(frame: int) -> ImageTexture:
 		_line(img, Vector2(x, 62), Vector2(32 + (x - 32) * 0.4, 26), 1, Color(0.7, 0.2, 0.45))
 	_outline(img, Color(0.1, 0.02, 0.06))
 	return ImageTexture.create_from_image(img)
+
+
+# --- Your mech, parked ------------------------------------------------------
+
+static func _mech(back: bool) -> ImageTexture:
+	var img := _blank()
+	var hull := Color(0.46, 0.5, 0.44)
+	var dark := Color(0.26, 0.28, 0.26)
+	# Legs and feet
+	_box(img, 19, 40, 27, 59, dark)
+	_box(img, 37, 40, 45, 59, dark)
+	_box(img, 15, 58, 30, 63, hull.darkened(0.3))
+	_box(img, 34, 58, 49, 63, hull.darkened(0.3))
+	# Arms with autocannons
+	_box(img, 4, 16, 14, 38, hull.darkened(0.1))
+	_box(img, 50, 16, 60, 38, hull.darkened(0.1))
+	_box(img, 6, 38, 11, 48, Color(0.15, 0.15, 0.16))
+	_box(img, 53, 38, 58, 48, Color(0.15, 0.15, 0.16))
+	# Torso
+	_box(img, 14, 12, 50, 42, hull)
+	_box(img, 20, 6, 44, 13, hull.lightened(0.1))
+	if back:
+		# Hatch, ladder rungs and exhaust vents: climb in here.
+		_box(img, 23, 15, 41, 33, Color(0.3, 0.32, 0.3))
+		_box(img, 25, 17, 39, 31, Color(0.38, 0.4, 0.37))
+		_box(img, 30, 23, 34, 25, Color(0.85, 0.7, 0.2))
+		for r in 4:
+			_box(img, 27, 34 + r * 3, 37, 34 + r * 3, Color(0.75, 0.75, 0.7))
+		_box(img, 16, 16, 20, 24, Color(0.12, 0.12, 0.12))
+		_box(img, 44, 16, 48, 24, Color(0.12, 0.12, 0.12))
+	else:
+		# Cockpit glass and hazard stripes
+		_box(img, 22, 16, 42, 25, Color(0.35, 0.75, 0.95))
+		_box(img, 24, 17, 31, 19, Color(0.8, 0.95, 1.0))
+		for i in 4:
+			_box(img, 16 + i * 9, 36, 20 + i * 9, 40, Color(0.85, 0.7, 0.15))
+	_outline(img, Color(0.06, 0.07, 0.06))
+	return ImageTexture.create_from_image(img)
+
+
+static func _cache(frame: int) -> ImageTexture:
+	var img := _blank()
+	var wood := Color(0.45, 0.33, 0.18)
+	_box(img, 14, 38, 50, 63, wood)
+	_box(img, 14, 38, 50, 42, wood.lightened(0.2))
+	for i in 3:
+		_box(img, 18 + i * 11, 46, 23 + i * 11, 58, Color(0.85, 0.7, 0.15))
+	var glow := Color(0.4, 1.0, 0.6) if frame == 0 else Color(0.75, 1.0, 0.8)
+	_dot(img, 32, 33, 4.0 if frame == 0 else 5.0, glow)
+	_outline(img, Color(0.08, 0.06, 0.03))
+	return ImageTexture.create_from_image(img)
+
+
+static func _box(img: Image, x0: int, y0: int, x1: int, y1: int, c: Color) -> void:
+	for y in range(y0, y1 + 1):
+		for x in range(x0, x1 + 1):
+			var shade := 1.08 if y < y0 + 2 else (0.85 if x > x1 - 2 else 1.0)
+			_put(img, x, y, Color(c.r * shade, c.g * shade, c.b * shade, 1.0))
 
 
 # --- Props -----------------------------------------------------------------

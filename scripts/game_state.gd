@@ -1,7 +1,7 @@
 extends Node
 ## Campaign state shared between the hangar and battles (autoload "GameState").
 
-const VERSION := "1.2"
+const VERSION := "1.3"
 const SAVE_PATH := "user://mechfps_save.cfg"
 
 const PARTS := ["torso", "left_arm", "right_arm", "legs"]
@@ -167,6 +167,9 @@ func apply_battle_result(result: Dictionary) -> void:
 	if won:
 		earned_credits += 150 + mission * 25
 		earned_salvage += 2
+	# Salvage caches found on foot.
+	earned_credits += int(result.get("bonus_credits", 0))
+	earned_salvage += int(result.get("bonus_salvage", 0))
 	credits += earned_credits
 	salvage += earned_salvage
 	kills_total += kills
@@ -188,6 +191,8 @@ func apply_battle_result(result: Dictionary) -> void:
 		"kills": kills,
 		"hives": hives,
 		"hives_total": result.get("hives_total", 0),
+		"caches": result.get("caches", 0),
+		"pilot_down": result.get("pilot_down", false),
 	}
 	if won:
 		mission += 1

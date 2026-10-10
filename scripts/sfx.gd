@@ -23,16 +23,18 @@ func _ready() -> void:
 	_sounds["step"] = _make(0.22, _step)
 	_sounds["splat"] = _make(0.3, _splat)
 	_sounds["click"] = _make(0.05, _click)
+	_sounds["hatch"] = _make(0.9, _hatch)
+	_sounds["pickup"] = _make(0.35, _pickup)
 
 
-func play(name: String, volume_db := 0.0, pitch_jitter := 0.08) -> void:
+func play(name: String, volume_db := 0.0, pitch_jitter := 0.08, pitch := 1.0) -> void:
 	if not _sounds.has(name):
 		return
 	var p := _players[_next]
 	_next = (_next + 1) % VOICES
 	p.stream = _sounds[name]
 	p.volume_db = volume_db
-	p.pitch_scale = 1.0 + randf_range(-pitch_jitter, pitch_jitter)
+	p.pitch_scale = pitch * (1.0 + randf_range(-pitch_jitter, pitch_jitter))
 	p.play()
 
 
@@ -116,3 +118,18 @@ func _splat(t: float, d: float, st: Dictionary) -> float:
 
 func _click(t: float, d: float, st: Dictionary) -> float:
 	return sin(TAU * 1500.0 * t) * exp(-t * 90.0) * 0.5
+
+
+func _hatch(t: float, d: float, st: Dictionary) -> float:
+	# Pneumatic hiss, then a metal clunk as the hatch locks.
+	var hiss := _lowpass(st, randf_range(-1, 1), 0.5) * exp(-t * 3.0) * 0.7
+	var tc := t - 0.55
+	var clunk := 0.0
+	if tc > 0.0:
+		clunk = (sin(TAU * 140.0 * tc) + sin(TAU * 333.0 * tc) * 0.5) * exp(-tc * 25.0)
+	return hiss + clunk
+
+
+func _pickup(t: float, d: float, st: Dictionary) -> float:
+	var f := 660.0 if t < 0.12 else 990.0
+	return sin(TAU * f * t) * 0.4 * (1.0 - t / d)

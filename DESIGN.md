@@ -36,6 +36,18 @@ The mech climbs ledges up to 0.6 high and can drop off anything (heavy
 landing shake). Aliens follow the same rules: they path around ledges
 and only bite you when they're on your level.
 
+## On foot
+- Tap **EXIT MECH** (under the minimap) to climb out of the back of the
+  mech. The mech stays parked where you left it, shown on the minimap.
+- The pilot is small and quick: walk, or push the stick all the way to
+  run. Armed with a carbine (no rockets). 40 HP, no armour, so be careful.
+- The mech is wide and can't fit through one-square gaps. Bunkers (with
+  one-square doors) and tight alleys hide **salvage caches** (+40 credits,
+  +1 salvage each), shown as yellow squares on the minimap.
+- To get back in, walk to the mech's **back** and tap **CLIMB IN**.
+- Aliens hunt the pilot, not the empty mech. If the pilot dies the
+  mission is lost and the recovery crew brings everyone home.
+
 ## Core loop
 1. **Hangar:** read the mission, repair damaged parts, buy upgrades.
 2. **Battle:** find and destroy every hive. Hives keep spawning aliens
@@ -84,11 +96,14 @@ flow field (pathfinding toward the player).
 ## Controls
 - **Phone:** left thumb anywhere on the left side = walking joystick;
   drag on the right side to turn and look up/down; hold FIRE (sliding on
-  it also aims); tap RKT for rockets.
+  it also aims); tap RKT for rockets; EXIT MECH / CLIMB IN under the minimap.
 - **Keyboard (testing):** WASD walk/strafe, arrows or Q/E turn,
-  T/G or PageUp/PageDown look up/down, Space fire, R or F rockets.
+  T/G or PageUp/PageDown look up/down, Space fire, R or F rockets,
+  X exit/board, Shift run on foot.
 
 ## Roadmap
+- **1.3:** climb out of the mech and explore on foot with a carbine; wider
+  mech that can't fit one-square gaps; bunkers and salvage caches.
 - **1.2:** terrain with heights: hills, craters, platforms with stairs,
   low cover walls, ruins of varied height; elevation readout under the minimap.
 - **1.1:** look up/down, shots and rockets go where the crosshair points.
