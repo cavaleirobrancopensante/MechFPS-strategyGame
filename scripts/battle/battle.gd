@@ -12,15 +12,18 @@ const AlienArt = preload("res://scripts/battle/alien_art.gd")
 const MechDiagram = preload("res://scripts/mech_diagram.gd")
 const Story = preload("res://scripts/story.gd")
 const ModelArt = preload("res://scripts/battle/model_art.gd")
+const Themes = preload("res://scripts/battle/themes.gd")
+const SettingsScript = preload("res://scripts/settings.gd")
 
 # --- View ---------------------------------------------------------------------
-const COLUMNS := 200          ## rays per frame; lower = faster on old phones
+var COLUMNS := 200            ## rays per frame (from Settings: graphics quality)
 const FOV_PLANE := 0.66       ## ~66 degree field of view
 const EYE := 1.25             ## cockpit eye height above the mech's feet
 const MAX_VIEW := 22.0
 const FOG_DIST := 15.0
-const FOG := Color(0.24, 0.12, 0.13)
-const FACE_COLORS := {
+# Colours come from the zone's theme (themes.gd), set in _ready().
+var FOG := Color(0.24, 0.12, 0.13)
+var FACE_COLORS := {
 	LevelMap.EMPTY: Color(0.38, 0.25, 0.2),      # dirt terraces and crater walls
 	LevelMap.RUIN: Color(0.58, 0.52, 0.45),
 	LevelMap.METAL: Color(0.42, 0.48, 0.56),
@@ -28,8 +31,16 @@ const FACE_COLORS := {
 	LevelMap.PLATFORM: Color(0.5, 0.5, 0.53),
 	LevelMap.RUBBLE: Color(0.42, 0.37, 0.33),
 }
-const GROUND_TOP := Color(0.27, 0.15, 0.13)
-const PLATFORM_TOP := Color(0.36, 0.36, 0.39)
+var GROUND_TOP := Color(0.27, 0.15, 0.13)
+var PLATFORM_TOP := Color(0.36, 0.36, 0.39)
+var zone_theme := {}
+var tint := Color.WHITE       ## light colour on sprites
+var weather := "none"
+var survival := false         ## endless waves, infinite ammo, just for fun
+var best_before := {}
+var new_best := false
+var paused := false
+var pause_layer: CanvasLayer
 
 # --- Controls -----------------------------------------------------------------
 const MECH_R := LevelMap.MECH_R
@@ -46,8 +57,8 @@ const PICKUP_TIME := 8.0
 const LZ_RADIUS := 2.5
 const BEACON_TIME := 3.0
 const KEY_TURN_SPEED := 2.4
-const LOOK_SENS := 0.0065
-const PITCH_SENS := 0.9       ## screen pixels of look per pixel of finger drag
+var LOOK_SENS := 0.0065
+var PITCH_SENS := 0.9         ## screen pixels of look per pixel of finger drag
 const PITCH_LIMIT := 0.7      ## max look up/down, as a fraction of screen height
 const JOY_RADIUS := 90.0
 const FIRE_R := 78.0
@@ -182,7 +193,13 @@ func _ready() -> void:
 		op = {"title": "Test Drop", "zone": "Test Range", "type": "destroy", "hives": 1, "diff": 1, "seed": 7}
 	mtype = op.get("type", "destroy")
 	diff = int(op.get("diff", 1))
+	survival = mtype == "endless"
+	best_before = GameState.survival_best.duplicate()
 	rng.seed = int(op.get("seed", 7)) + 99
+	COLUMNS = Settings.columns()
+	LOOK_SENS *= Settings.look_sensitivity
+	PITCH_SENS *= Settings.look_sensitivity
+	_apply_theme(Themes.pick(int(op.get("theme_seed", op.get("seed", 7)))))
 	tex = AlienArt.build_all()
 	tex3d = ModelArt.build_all()
 	pilot_max_hp = GameState.pilot_max_hp()
@@ -192,7 +209,13 @@ func _ready() -> void:
 
 	map = LevelMap.new()
 	var nest_count: int = op.get("hives", 0) + (1 if mtype == "boss" else 0)
-	map.generate(int(op.get("seed", 7)), nest_count)
+	map.generate(int(op.get("seed", 7)), nest_count, String(zone_theme["layout"]))
+	if zone_theme.get("organic_extra", false):
+		# The swarm has grown over everything here.
+		for i in map.kinds.size():
+			if map.kinds[i] == LevelMap.RUIN and map.hard[i] == 0 and rng.randf() < 0.35:
+				map.kinds[i] = LevelMap.ORGANIC
+				map.wall_hp[i] = 1
 	hives_total = map.hive_cells.size()
 	pos = map.start
 	floor_z = map.height_at(pos)
@@ -220,8 +243,7 @@ func _ready() -> void:
 	for i in count:
 		var c: Vector2i = nests[i]
 		_spawn(_pick_kind(), Vector2(c) + Vector2(rng.randf_range(0.3, 0.7), rng.randf_range(0.3, 0.7)), false)
-	for sp in map.prop_spots:
-		props.append({"pos": sp, "z": map.height_at(sp), "kind": "crystal" if rng.randf() < 0.3 else "rock"})
+	_place_props()
 
 	_setup_mission()
 
@@ -230,10 +252,89 @@ func _ready() -> void:
 	for c in COLUMNS:
 		col_events[c] = PackedFloat32Array()
 	_update_flow()
-	_show_msg(String(op.get("title", "")).to_upper() + " — " + GameState.objective_text(op).to_upper(), 4.0)
+	if survival:
+		_show_msg("SURVIVAL — " + String(zone_theme["name"]).to_upper(), 4.0)
+	else:
+		_show_msg(String(op.get("title", "")).to_upper() + " — " + GameState.objective_text(op).to_upper(), 4.0)
 	_radio("drop")
 	Sfx.play("rocket", -4.0, 0.0, 0.6)
+	_build_pause_menu()
 
+
+func _apply_theme(t: Dictionary) -> void:
+	zone_theme = t
+	FOG = t["fog"]
+	var walls: Dictionary = t["walls"]
+	FACE_COLORS = {
+		LevelMap.EMPTY: walls["empty"], LevelMap.RUIN: walls["ruin"], LevelMap.METAL: walls["metal"],
+		LevelMap.ORGANIC: walls["organic"], LevelMap.PLATFORM: walls["platform"], LevelMap.RUBBLE: walls["rubble"],
+	}
+	GROUND_TOP = t["ground_top"]
+	PLATFORM_TOP = t["platform_top"]
+	tint = t["tint"]
+	weather = t["weather"]
+
+
+const SOLID_PROPS := {"car": 0.75, "barrel": 0.3, "tree": 0.35, "pine": 0.3}
+
+
+func _place_props() -> void:
+	## Scenery for the zone's theme: trees, wrecked cars, barrels, rocks.
+	var kinds_list: Array = zone_theme["props"]
+	var spots: Array = map.prop_spots.duplicate()
+	var density: float = zone_theme.get("prop_density", 1.0)
+	var extra := int(spots.size() * maxf(density - 1.0, 0.0))
+	for i in extra * 4:
+		if extra <= 0:
+			break
+		var x := rng.randi_range(1, map.w - 2)
+		var y := rng.randi_range(1, map.h - 2)
+		if map.kinds[map.idx(x, y)] != LevelMap.EMPTY:
+			continue
+		var sp := Vector2(x + rng.randf_range(0.25, 0.75), y + rng.randf_range(0.25, 0.75))
+		if sp.distance_to(map.start) < 3.0:
+			continue
+		spots.append(sp)
+		extra -= 1
+	for sp: Vector2 in spots:
+		var near_cache := false
+		for c: Vector2 in map.cache_spots:
+			if c.distance_to(sp) < 1.5:
+				near_cache = true
+		var kind: String = kinds_list[rng.randi_range(0, kinds_list.size() - 1)]
+		if (near_cache or sp.distance_to(map.start) < 4.0) and SOLID_PROPS.has(kind):
+			kind = "rock"
+		props.append({"pos": sp, "z": map.height_at(sp), "kind": kind, "face": rng.randf() * TAU, "crushed": false})
+
+
+func _crush_props() -> void:
+	## Brigid walks through scenery: cars crumple, trees fall, barrels go up.
+	for p in props:
+		if p.get("crushed", false) or not SOLID_PROPS.has(p["kind"]):
+			continue
+		if pos.distance_to(p["pos"]) > MECH_R + float(SOLID_PROPS[p["kind"]]) * 0.6:
+			continue
+		_wreck_prop(p)
+
+
+func _wreck_prop(p: Dictionary) -> void:
+	p["crushed"] = true
+	var pp: Vector2 = p["pos"]
+	match p["kind"]:
+		"barrel":
+			explosions.append({"pos": pp, "z": p["z"] + 0.5, "t": 0.0, "dur": 0.8, "size": 1.1, "col": Color(1.0, 0.55, 0.15)})
+			Sfx.play("boom", -4.0, 0.15)
+			shake = maxf(shake, 6.0)
+			for a in aliens:
+				if not a["dead"] and a["pos"].distance_to(pp) < 2.2:
+					_damage_alien(a, 60.0)
+		"car":
+			Sfx.play("hit", -2.0, 0.1, 0.6)
+			shake = maxf(shake, 4.0)
+			explosions.append({"pos": pp, "z": p["z"] + 0.3, "t": 0.0, "dur": 0.7, "size": 0.6, "col": Color(0.5, 0.48, 0.45), "smoke": true})
+		_:
+			Sfx.play("hit", -4.0, 0.1, 0.5)
+			explosions.append({"pos": pp, "z": p["z"] + 1.5, "t": 0.0, "dur": 0.9, "size": 1.0, "col": Color(0.3, 0.45, 0.2), "smoke": true})
 
 func _build_backdrop() -> void:
 	for i in 90:
@@ -369,6 +470,8 @@ func _update_player(delta: float) -> void:
 		Sfx.play("step", -1.0)
 	eye_z = floor_z + eye_h
 	_check_caches()
+	if not on_foot:
+		_crush_props()
 
 	var moving := inp.length()
 	bob_amount = lerpf(bob_amount, moving, minf(1.0, delta * 6.0))
@@ -418,7 +521,8 @@ func _fire_cannon() -> void:
 		_out_of_ammo()
 		fire_cd = 0.3
 		return
-	ammo_left["shells"] -= 1
+	if not survival:
+		ammo_left["shells"] -= 1
 	var g: int = next_gun if guns.has(next_gun) else guns[0]
 	next_gun = 1 - g
 	fire_cd = 0.11 if guns.size() == 2 else 0.17
@@ -435,7 +539,8 @@ func _fire_carbine() -> void:
 		_out_of_ammo()
 		fire_cd = 0.3
 		return
-	ammo_left["rounds"] -= 1
+	if not survival:
+		ammo_left["rounds"] -= 1
 	fire_cd = 0.16
 	muzzle[0] = 0.05
 	recoil[0] = 1.0
@@ -475,7 +580,8 @@ func _fire_rocket() -> void:
 		_out_of_ammo()
 		rocket_cd = 0.5
 		return
-	ammo_left["rockets"] -= 1
+	if not survival:
+		ammo_left["rockets"] -= 1
 	rocket_cd = GameState.rocket_cooldown()
 	var dir := Vector2.from_angle(angle)
 	# Climb/dive rate matching the crosshair line: aiming below the horizon dives.
@@ -904,6 +1010,9 @@ func _finish() -> void:
 	move_touch = -1
 	look_touch = -1
 	move_vec = Vector2.ZERO
+	if survival:
+		new_best = GameState.record_survival(wave, kills)
+		return
 	GameState.apply_mission_result({
 		"won": state == State.WON,
 		"aborted": state == State.RETREATED,
@@ -940,6 +1049,9 @@ func _blast_terrain(p: Vector2, z: float) -> void:
 		set_meta("told_hard", true)
 		_radio_line("mags", "That's a pre-war blast shelter. Rockets won't scratch it. You'll have to walk in.")
 	# Collateral damage.
+	for pr in props:
+		if not pr.get("crushed", false) and SOLID_PROPS.has(pr["kind"]) and pr["pos"].distance_to(p) < 1.6:
+			_wreck_prop(pr)
 	for sv in survivors_list:
 		if not sv["freed"] and not sv.get("dead", false) and sv["pos"].distance_to(p) < 2.0:
 			sv["dead"] = true
@@ -1054,6 +1166,14 @@ func _setup_mission() -> void:
 			breaches = _pick_cells(4, true, 10, 6.0)
 			if breaches.is_empty():
 				breaches = [Vector2(map.w - 3.5, map.h - 3.5)]
+		"endless":
+			# Survival: the swarm pours in from all sides, forever.
+			waves_total = 1000000
+			wave_pause = 4.0
+			breaches = _pick_cells(6, true, 9, 5.0)
+			if breaches.is_empty():
+				breaches = [Vector2(map.w - 3.5, map.h - 3.5)]
+			nooks.clear()
 	# Sometimes someone is hiding even when nobody called for help.
 	if mtype != "rescue" and not nooks.is_empty() and rng.randf() < 0.6:
 		var sp2: Vector2 = nooks.pop_front()
@@ -1061,7 +1181,7 @@ func _setup_mission() -> void:
 	for sp3: Vector2 in nooks:
 		caches.append({"pos": sp3, "z": map.height_at(sp3), "taken": false, "anim": rng.randf() * 3.0, "face": rng.randf() * TAU})
 	# Landing zone for pickup.
-	if mtype == "survive":
+	if mtype == "survive" or survival:
 		lz = map.start
 	else:
 		var lzs := _pick_cells(1, true, 9, 0.0, cargo.map(func(it): return it["pos"]))
@@ -1113,6 +1233,15 @@ func _update_waves(delta: float) -> void:
 			_spawn_wave()
 		return
 	wave_timer += delta
+	if survival:
+		if alive == 0 or (alive <= 2 and wave_timer > 25.0) or wave_timer > 50.0:
+			wave_pause = 6.0
+			# Repair drones patch Brigid up between waves.
+			for pn in GameState.PARTS:
+				parts[pn] = minf(GameState.max_hp(pn), parts[pn] + GameState.max_hp(pn) * 0.15)
+			pilot_hp = minf(pilot_max_hp, pilot_hp + pilot_max_hp * 0.25)
+			_show_msg("WAVE %d HELD — REPAIR DRONES +15%%" % wave, 2.5)
+		return
 	if wave < waves_total and (alive <= 1 or wave_timer > 40.0):
 		wave_pause = 5.0
 		_show_msg("WAVE %d HELD — NEXT ONE COMING" % wave, 2.5)
@@ -1120,6 +1249,11 @@ func _update_waves(delta: float) -> void:
 
 func _spawn_wave() -> void:
 	var n := 4 + 2 * wave + diff
+	if survival:
+		# Every wave is bigger and every third wave the swarm gets tougher.
+		diff = 1 + wave / 3
+		n = mini(4 + wave * 2, 24)
+		n = mini(n, 36 - _alive_hostiles())
 	for k in n:
 		var b: Vector2 = breaches[k % breaches.size()]
 		for attempt in 8:
@@ -1128,7 +1262,10 @@ func _spawn_wave() -> void:
 				_spawn(_pick_kind(), p, true)
 				explosions.append({"pos": p, "z": map.height_at(p) + 0.3, "t": -k * 0.05, "dur": 0.5, "size": 0.6, "col": Color(0.75, 0.3, 0.8)})
 				break
-	_show_msg("WAVE %d / %d" % [wave, waves_total], 2.0)
+	if survival:
+		_show_msg("WAVE %d" % wave, 2.0)
+	else:
+		_show_msg("WAVE %d / %d" % [wave, waves_total], 2.0)
 	_radio("wave")
 	Sfx.play("screech", -2.0, 0.2)
 
@@ -1155,6 +1292,8 @@ func _objective_met() -> bool:
 			return items_got >= _cargo_needed()
 		"scout":
 			return beacons_done >= beacons.size()
+		"endless":
+			return false
 		"survive":
 			return wave >= waves_total and wave_pause <= 0.0 and (_alive_hostiles() == 0 or (_alive_hostiles() <= 1 and wave_timer > 20.0))
 	return false
@@ -1176,7 +1315,7 @@ func _update_mission(delta: float) -> void:
 				_show_msg("RELAY ONLINE %d/%d" % [beacons_done, beacons.size()], 2.0)
 		else:
 			b["prog"] = maxf(0.0, b["prog"] - delta * 0.5)
-	if mtype == "survive":
+	if mtype == "survive" or survival:
 		_update_waves(delta)
 	if not objective_done and _objective_met():
 		objective_done = true
@@ -1207,13 +1346,21 @@ func _update_mission(delta: float) -> void:
 
 func _objective_string() -> String:
 	if phase == "drop":
-		return "DROPPING INTO %s" % String(op.get("zone", "")).to_upper()
+		var cond: String = String(zone_theme["name"]).get_slice("·", 1).strip_edges()
+		if survival:
+			return "DROPPING INTO %s" % String(zone_theme["name"]).to_upper()
+		return "DROPPING INTO %s — %s" % [String(op.get("zone", "")).to_upper(), cond.to_upper()]
 	if phase == "lift":
 		return "EXTRACTING — GOING HOME"
 	if objective_done:
 		if pickup_t > 0.0:
 			return "HOLD THE LZ — GANNET LANDING IN %ds" % int(ceil(PICKUP_TIME - pickup_t))
 		return "EXTRACT: GET BRIGID TO THE GREEN FLARE"
+	if survival:
+		var best := "  ·  BEST WAVE %d" % int(best_before["wave"]) if int(best_before["wave"]) > 0 else ""
+		if wave_pause > 0.0:
+			return "WAVE %d IN %ds%s" % [wave + 1, int(ceil(wave_pause)), best]
+		return "WAVE %d — %d HOSTILES — %d KILLS%s" % [wave, _alive_hostiles(), kills, best]
 	match mtype:
 		"destroy":
 			return "DESTROY HIVES %d/%d" % [hives_destroyed, hives_total]
@@ -1417,7 +1564,9 @@ func _show_msg(text: String, dur: float) -> void:
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if state != State.PLAYING and end_time > 1.0 and event.keycode in [KEY_SPACE, KEY_ENTER, KEY_ESCAPE]:
-			get_tree().change_scene_to_file("res://scenes/base.tscn")
+			_leave()
+		elif state == State.PLAYING and (event.keycode == KEY_ESCAPE or event.keycode == KEY_P):
+			_set_paused(true)
 		elif state == State.PLAYING and event.keycode == KEY_X:
 			_toggle_mech()
 		return
@@ -1429,14 +1578,11 @@ func _input(event: InputEvent) -> void:
 				return
 			if state != State.PLAYING:
 				if end_time > 1.2:
-					get_tree().change_scene_to_file("res://scenes/base.tscn")
+					_leave()
 				return
 			if _retreat_rect().has_point(p):
-				if retreat_armed > 0.0:
-					aborted = true
-				else:
-					retreat_armed = 2.5
-					Sfx.play("click")
+				Sfx.play("click")
+				_set_paused(true)
 				return
 			if _mech_button_rect(s).has_point(p) and phase != "drop" and phase != "lift":
 				_toggle_mech()
@@ -1490,7 +1636,142 @@ func _rocket_center(s: Vector2) -> Vector2:
 
 
 func _retreat_rect() -> Rect2:
+	## The pause button, top-left.
 	return Rect2(16, 16, 150, 46)
+
+
+func _leave() -> void:
+	get_tree().paused = false
+	if survival:
+		get_tree().change_scene_to_file("res://scenes/menu.tscn")
+	else:
+		get_tree().change_scene_to_file("res://scenes/base.tscn")
+
+
+# --- Pause menu ------------------------------------------------------------------
+
+func _notification(what: int) -> void:
+	# Pause when the phone app goes to the background.
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and state == State.PLAYING and is_inside_tree():
+		_set_paused(true)
+
+
+func _build_pause_menu() -> void:
+	pause_layer = CanvasLayer.new()
+	pause_layer.layer = 20
+	pause_layer.process_mode = Node.PROCESS_MODE_ALWAYS
+	pause_layer.visible = false
+	add_child(pause_layer)
+
+
+func _set_paused(on: bool) -> void:
+	if pause_layer == null or paused == on:
+		return
+	paused = on
+	get_tree().paused = on
+	pause_layer.visible = on
+	fire_touch = -1
+	move_touch = -1
+	look_touch = -1
+	move_vec = Vector2.ZERO
+	if on:
+		_show_pause_main()
+
+
+func _clear_pause() -> void:
+	for c in pause_layer.get_children():
+		c.queue_free()
+
+
+func _pause_backdrop() -> CenterContainer:
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.6)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	pause_layer.add_child(dim)
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	pause_layer.add_child(center)
+	return center
+
+
+func _pause_button(text: String, col: Color, cb: Callable) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(420, 64)
+	b.focus_mode = Control.FOCUS_NONE
+	b.add_theme_font_size_override("font_size", 24)
+	b.add_theme_color_override("font_color", col)
+	b.pressed.connect(func():
+		Sfx.play("click")
+		cb.call())
+	return b
+
+
+func _show_pause_main() -> void:
+	_clear_pause()
+	var center := _pause_backdrop()
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 14)
+	center.add_child(v)
+	var title := Label.new()
+	title.text = "PAUSED"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 44)
+	title.add_theme_color_override("font_color", Color(0.4, 1.0, 0.6))
+	v.add_child(title)
+	var sub := Label.new()
+	sub.text = (("Survival · wave %d · %d kills" % [wave, kills]) if survival else String(op.get("title", "")) + " — " + String(op.get("zone", ""))) + "\n" + String(zone_theme["name"])
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.add_theme_font_size_override("font_size", 18)
+	sub.add_theme_color_override("font_color", Color(0.8, 0.85, 0.8))
+	v.add_child(sub)
+	v.add_child(_pause_button("Resume", Color(0.5, 1.0, 0.6), func(): _set_paused(false)))
+	v.add_child(_pause_button("Settings", Color(0.9, 0.9, 0.9), func():
+		_clear_pause()
+		var c2 := _pause_backdrop()
+		c2.add_child(SettingsScript.build_panel(func():
+			_apply_live_settings()
+			_show_pause_main()))))
+	if survival:
+		v.add_child(_pause_button("End run", Color(1.0, 0.75, 0.35), func(): _confirm_quit(false)))
+	else:
+		v.add_child(_pause_button("Abort mission (fly home)", Color(1.0, 0.75, 0.35), func(): _confirm_quit(false)))
+	v.add_child(_pause_button("Quit to main menu", Color(1.0, 0.5, 0.45), func(): _confirm_quit(true)))
+
+
+func _confirm_quit(to_menu: bool) -> void:
+	_clear_pause()
+	var center := _pause_backdrop()
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 14)
+	center.add_child(v)
+	var l := Label.new()
+	if survival:
+		l.text = "End this run? Your wave counts toward your best."
+	else:
+		l.text = "Abort the mission? The Gannet pulls you out.\nYou keep what you found, but the job isn't done."
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.add_theme_font_size_override("font_size", 22)
+	v.add_child(l)
+	v.add_child(_pause_button("Yes, " + ("end run" if survival else "abort"), Color(1.0, 0.6, 0.45), func():
+		aborted = true
+		state = State.RETREATED
+		_finish()
+		_set_paused(false)
+		if to_menu:
+			get_tree().change_scene_to_file("res://scenes/menu.tscn")))
+	v.add_child(_pause_button("No, keep fighting", Color(0.5, 1.0, 0.6), func(): _show_pause_main()))
+
+
+func _apply_live_settings() -> void:
+	LOOK_SENS = 0.0065 * Settings.look_sensitivity
+	PITCH_SENS = 0.9 * Settings.look_sensitivity
+	var cols := Settings.columns()
+	if cols != COLUMNS:
+		COLUMNS = cols
+		col_events.resize(COLUMNS)
+		for c in COLUMNS:
+			col_events[c] = PackedFloat32Array()
 
 
 func _mech_button_rect(s: Vector2) -> Rect2:
@@ -1515,6 +1796,7 @@ func _draw() -> void:
 	_draw_world(w, h, horizon, proj_scale)
 	_draw_sprites(w, h, horizon, proj_scale)
 	_draw_tracers(w, h, horizon, proj_scale)
+	_draw_weather(w, h)
 	if _in_cockpit_view():
 		_draw_guns(w, h)
 		_draw_cockpit(w, h)
@@ -1537,40 +1819,46 @@ func _sky_x(rel: float, w: float) -> float:
 
 
 func _draw_sky(w: float, h: float, horizon: float) -> void:
-	draw_rect(Rect2(-40, -40, w + 80, horizon - h * 0.55 + 41), Color(0.04, 0.02, 0.09))
+	var top: Color = zone_theme["sky_top"]
+	var hor: Color = zone_theme["sky_horizon"]
+	draw_rect(Rect2(-40, -40, w + 80, horizon - h * 0.55 + 41), top)
 	draw_polygon(
 		PackedVector2Array([Vector2(-40, horizon - h * 0.55), Vector2(w + 40, horizon - h * 0.55), Vector2(w + 40, horizon), Vector2(-40, horizon)]),
-		PackedColorArray([Color(0.04, 0.02, 0.09), Color(0.04, 0.02, 0.09), Color(0.5, 0.2, 0.16), Color(0.5, 0.2, 0.16)]))
+		PackedColorArray([top, top, hor, hor]))
 	var half_fov := atan(FOV_PLANE) + 0.05
-	for st in stars:
-		var rel := wrapf(st["a"] - angle, -PI, PI)
-		if absf(rel) > half_fov:
-			continue
-		var y: float = horizon - st["e"] * h * 0.45
-		var b: float = st["b"] * (0.6 + 0.4 * sin(time * 2.0 + st["a"] * 9.0))
-		draw_rect(Rect2(_sky_x(rel, w), y, 2, 2), Color(1, 0.95, 0.9, b * clampf((horizon - y) / (h * 0.45), 0.0, 1.0) * 1.3))
+	var star_k: float = zone_theme["stars"]
+	if star_k > 0.0:
+		for st in stars:
+			var rel := wrapf(st["a"] - angle, -PI, PI)
+			if absf(rel) > half_fov:
+				continue
+			var y: float = horizon - st["e"] * h * 0.45
+			var b: float = st["b"] * (0.6 + 0.4 * sin(time * 2.0 + st["a"] * 9.0)) * star_k
+			draw_rect(Rect2(_sky_x(rel, w), y, 2, 2), Color(1, 0.95, 0.9, b * clampf((horizon - y) / (h * 0.45), 0.0, 1.0) * 1.3))
 
-	# Ringed gas giant hanging over the battlefield.
+	# Ringed gas giant (the Lantern) hanging over the battlefield, washed
+	# out by daylight or haze in brighter zones.
 	var prel := wrapf(0.9 - angle, -PI, PI)
-	if absf(prel) < half_fov + 0.3:
+	if zone_theme["planet"] and absf(prel) < half_fov + 0.3:
 		var c := Vector2(_sky_x(prel, w), horizon - h * 0.31)
 		var r := 64.0
+		var wash := clampf(hor.get_luminance() - 0.35, 0.0, 0.6)
 		var ring: Array[Vector2] = []
 		for i in 49:
 			var t := float(i) / 48.0 * TAU
 			ring.append(c + Vector2(cos(t) * r * 1.9, sin(t) * r * 0.42).rotated(-0.25))
-		draw_polyline(PackedVector2Array(ring.slice(24, 49)), Color(0.9, 0.75, 0.6, 0.6), 3.0)
-		draw_circle(c, r, Color(0.78, 0.5, 0.38))
-		draw_circle(c + Vector2(14, 10), r * 0.86, Color(0.58, 0.32, 0.27))
-		draw_circle(c + Vector2(26, 18), r * 0.7, Color(0.38, 0.18, 0.18))
-		draw_polyline(PackedVector2Array(ring.slice(0, 25)), Color(0.95, 0.82, 0.65, 0.8), 3.0)
+		draw_polyline(PackedVector2Array(ring.slice(24, 49)), Color(0.9, 0.75, 0.6, 0.6 - wash * 0.6), 3.0)
+		draw_circle(c, r, Color(0.78, 0.5, 0.38).lerp(top, wash))
+		draw_circle(c + Vector2(14, 10), r * 0.86, Color(0.58, 0.32, 0.27).lerp(top, wash))
+		draw_circle(c + Vector2(26, 18), r * 0.7, Color(0.38, 0.18, 0.18).lerp(top, wash))
+		draw_polyline(PackedVector2Array(ring.slice(0, 25)), Color(0.95, 0.82, 0.65, 0.8 - wash * 0.8), 3.0)
 
-	# Distant mountain ridges (two layers).
+	# Distant ridges (two layers).
 	var strips := 80
 	var sw := w / strips
 	for layer in 2:
 		var ridge := ridge_far if layer == 0 else ridge_near
-		var col := Color(0.24, 0.1, 0.13) if layer == 0 else Color(0.15, 0.06, 0.09)
+		var col: Color = zone_theme["ridge_far"] if layer == 0 else zone_theme["ridge_near"]
 		for i in strips:
 			var xc := (i + 0.5) * sw
 			var rel := atan((2.0 * xc / w - 1.0) * FOV_PLANE)
@@ -1580,10 +1868,59 @@ func _draw_sky(w: float, h: float, horizon: float) -> void:
 
 
 func _draw_ground(w: float, h: float, horizon: float) -> void:
+	var gf: Color = zone_theme["ground_far"]
+	var gn: Color = zone_theme["ground_near"]
 	draw_polygon(
 		PackedVector2Array([Vector2(-40, horizon), Vector2(w + 40, horizon), Vector2(w + 40, h + 40), Vector2(-40, h + 40)]),
-		PackedColorArray([Color(0.26, 0.14, 0.12), Color(0.26, 0.14, 0.12), Color(0.13, 0.09, 0.08), Color(0.13, 0.09, 0.08)]))
+		PackedColorArray([gf, gf, gn, gn]))
 
+
+func _draw_weather(w: float, h: float) -> void:
+	## Rain, snow, dust, ash, spores or fireflies. The particles are worked
+	## out from time alone (no state), and slide sideways as you turn.
+	if weather == "none":
+		return
+	var shift := angle / TAU * w * 2.2
+	match weather:
+		"rain":
+			for i in 140:
+				var sp := 900.0 + fposmod(i * 37.0, 400.0)
+				var x := fposmod(i * 97.13 - shift + time * 60.0, w + 40.0) - 20.0
+				var y := fposmod(i * 53.7 + time * sp, h + 60.0) - 30.0
+				draw_line(Vector2(x, y), Vector2(x - 4.0, y + 22.0), Color(0.7, 0.8, 1.0, 0.28), 1.5)
+			draw_rect(Rect2(0, 0, w, h), Color(0.3, 0.4, 0.6, 0.06))
+		"snow":
+			for i in 110:
+				var sp2 := 40.0 + fposmod(i * 13.0, 50.0)
+				var x2 := fposmod(i * 97.13 - shift + sin(time * 0.8 + i) * 24.0, w + 20.0) - 10.0
+				var y2 := fposmod(i * 61.3 + time * sp2, h + 20.0) - 10.0
+				draw_circle(Vector2(x2, y2), 1.5 + fposmod(i * 0.37, 2.0), Color(1, 1, 1, 0.75))
+		"dust":
+			for i in 50:
+				var x3 := fposmod(i * 131.7 - shift + time * (30.0 + i), w + 20.0) - 10.0
+				var y3 := fposmod(i * 71.3 + sin(time + i) * 10.0, h)
+				draw_circle(Vector2(x3, y3), 1.2, Color(1.0, 0.95, 0.8, 0.35))
+			draw_rect(Rect2(0, 0, w, h), Color(1.0, 0.92, 0.75, 0.05))
+		"ash":
+			for i in 90:
+				var x4 := fposmod(i * 97.13 - shift + time * 25.0 + sin(time + i) * 20.0, w + 20.0) - 10.0
+				var y4 := fposmod(i * 61.3 + time * (25.0 + fposmod(i * 7.0, 20.0)), h + 20.0) - 10.0
+				draw_rect(Rect2(x4, y4, 2.5, 2.0), Color(0.2, 0.2, 0.18, 0.55))
+			draw_rect(Rect2(0, 0, w, h), Color(0.55, 0.5, 0.3, 0.07))
+		"spores":
+			for i in 60:
+				var x5 := fposmod(i * 113.1 - shift + sin(time * 0.5 + i) * 40.0, w + 20.0) - 10.0
+				var y5 := fposmod(i * 67.9 - time * (12.0 + fposmod(i * 3.0, 12.0)), h + 20.0) - 10.0
+				var pulse := 0.5 + 0.5 * sin(time * 3.0 + i)
+				draw_circle(Vector2(x5, y5), 2.5, Color(1.0, 0.5, 0.95, 0.25 + 0.35 * pulse))
+		"fireflies":
+			for i in 34:
+				var x6 := fposmod(i * 151.3 - shift + sin(time * 0.6 + i * 1.7) * 60.0, w + 20.0) - 10.0
+				var y6 := h * 0.45 + fposmod(i * 37.1, h * 0.4) + sin(time * 0.9 + i) * 25.0
+				var blink := clampf(sin(time * 2.0 + i * 2.3) * 2.0, 0.0, 1.0)
+				if blink > 0.0:
+					draw_circle(Vector2(x6, y6), 5.0, Color(0.9, 1.0, 0.4, 0.15 * blink))
+					draw_circle(Vector2(x6, y6), 2.0, Color(1.0, 1.0, 0.6, 0.9 * blink))
 
 
 func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
@@ -1672,7 +2009,7 @@ func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
 				if y_vis > y_top:
 					var wall_x := (py + d_in * rdy) if side == 0 else (px + d_in * rdx)
 					wall_x -= floorf(wall_x)
-					_draw_face(x, cw, y_top, y_vis, nh, cur_h, kinds[ci], side, wall_x, d_in, horizon, ps)
+					_draw_face(x, cw, y_top, y_vis, nh, cur_h, kinds[ci], side, wall_x, d_in, horizon, ps, ci)
 				if y_top < clip:
 					clip = y_top
 					ev.append(d_in)
@@ -1688,7 +2025,7 @@ func _top_color(height: float, kind: int, d: float) -> Color:
 		LevelMap.PLATFORM:
 			col = PLATFORM_TOP
 		LevelMap.RUBBLE:
-			col = Color(0.36, 0.31, 0.28)
+			col = FACE_COLORS[LevelMap.RUBBLE].darkened(0.15)
 		LevelMap.EMPTY:
 			col = GROUND_TOP.lightened(clampf(height * 0.12, 0.0, 0.3)) if height >= 0.0 else GROUND_TOP.darkened(0.35 * minf(-height, 1.0))
 		_:
@@ -1704,7 +2041,7 @@ func _vband(x: float, cw: float, y0: float, y1: float, lo: float, hi: float, c: 
 		draw_rect(Rect2(x, a, cw, b - a), c)
 
 
-func _draw_face(x: float, cw: float, y_top: float, y_vis: float, top_h: float, base_h: float, kind: int, side: int, wall_x: float, d: float, horizon: float, proj_scale: float) -> void:
+func _draw_face(x: float, cw: float, y_top: float, y_vis: float, top_h: float, base_h: float, kind: int, side: int, wall_x: float, d: float, horizon: float, proj_scale: float, cell := 0) -> void:
 	var fog := clampf(d / FOG_DIST, 0.0, 1.0)
 	var base: Color = FACE_COLORS.get(kind, FACE_COLORS[LevelMap.METAL])
 	if side == 1:
@@ -1733,11 +2070,23 @@ func _draw_face(x: float, cw: float, y_top: float, y_vis: float, top_h: float, b
 				var u := fposmod(wall_x * 2.0, 1.0)
 				if u > 0.25 and u < 0.62:
 					var z := base_h + 0.7
+					var win: Color = zone_theme["window"]
+					var lit_k: float = zone_theme["lit"]
+					var wcol := int(floor(wall_x * 2.0))
+					var floor_i := 0
 					while z + 0.5 < top_h - 0.3:
 						var wy0 := horizon - (z + 0.5 - eye_z) * k
 						var wy1 := horizon - (z - eye_z) * k
-						_vband(x, cw, wy0, wy1, lo, hi, Color(0.06, 0.04, 0.05, 0.75 * (1.0 - fog)))
+						var hsh := fposmod(sin(float(cell * 7 + wcol * 13 + floor_i * 31 + side * 5) * 12.9898) * 43758.5453, 1.0)
+						if hsh < lit_k:
+							# Someone left a light on. Or someone's still in there.
+							var warm := Color(1.0, 0.78, 0.4).lerp(FOG, fog * 0.6)
+							warm.a = 0.95 - 0.1 * float(hsh < lit_k * 0.15) * (0.5 + 0.5 * sin(time * 9.0 + cell))
+							_vband(x, cw, wy0, wy1, lo, hi, warm)
+						else:
+							_vband(x, cw, wy0, wy1, lo, hi, Color(win.r, win.g, win.b, 0.75 * (1.0 - fog)))
 						z += 1.3
+						floor_i += 1
 				if fposmod(wall_x * 4.0, 1.0) < 0.06:
 					draw_rect(Rect2(x, lo, cw, hi - lo), shade)
 			else:
@@ -1771,7 +2120,7 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 			items.append([pr.y, 0, a, pr.x])
 	for p in props:
 		var pr := _project(p["pos"])
-		if pr.y > 0.15 and pr.y < 14.0:
+		if pr.y > 0.15 and pr.y < (MAX_VIEW if tex3d.has(p["kind"]) else 14.0):
 			items.append([pr.y, 1, p, pr.x])
 	for p in projectiles:
 		var pr := _project(p["pos"])
@@ -1836,7 +2185,7 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				if nest:
 					rate = 2.0
 				var frame: Texture2D = _view_frame(o["kind"], o["face"], o["pos"], o["anim"] * rate)
-				var mod := Color.WHITE.lerp(FOG, fog * 0.85)
+				var mod := tint.lerp(FOG, fog * 0.85)
 				var ww: float = lw * (1.0 + o["lunge"] * 0.25)
 				var hh: float = lw * (1.0 + o["lunge"] * 0.15)
 				var bob: float = absf(sin(o["anim"] * rate * PI * 0.5)) * 0.05 * lw if o["moving"] else 0.0
@@ -1860,11 +2209,27 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				if o == locked_target and state == State.PLAYING:
 					_draw_brackets(rect, Color(1.0, 0.25, 0.2))
 			1:
-				var t: Texture2D = tex[o["kind"]][0]
-				var mod2 := Color.WHITE.lerp(FOG, fog * 0.85)
-				if o["kind"] == "crystal":
-					mod2 = mod2.lerp(Color(1.4, 1.4, 1.4), 0.3 + 0.2 * sin(time * 2.0))
-				_billboard(t, sx, ty, 0.6, 0.6, o["z"], mod2, horizon, proj_scale, col_w)
+				var mod2 := tint.lerp(FOG, fog * 0.85)
+				var pk: String = o["kind"]
+				if tex3d.has(pk):
+					var pl: float = tex3d[pk]["L"]
+					var crushed: bool = o.get("crushed", false)
+					if pk == "barrel" and crushed:
+						continue
+					if not crushed:
+						_draw_shadow(o["pos"], o["z"], float(SOLID_PROPS.get(pk, 0.3)) * 0.8, horizon, proj_scale, fog, ty)
+					var pt: Texture2D = _view_frame(pk, o.get("face", 0.0), o["pos"], 0.0)
+					if crushed:
+						# Flattened car, or a felled tree lying in the mud.
+						mod2 = mod2.darkened(0.3)
+						_billboard(pt, sx, ty, pl * (1.25 if pk == "car" else 1.1), pl * (0.35 if pk == "car" else 0.22), o["z"], mod2, horizon, proj_scale, col_w)
+					else:
+						_billboard(pt, sx, ty, pl, pl, o["z"], mod2, horizon, proj_scale, col_w)
+				else:
+					var t: Texture2D = tex[pk][0]
+					if pk == "crystal":
+						mod2 = mod2.lerp(Color(1.4, 1.4, 1.4), 0.3 + 0.2 * sin(time * 2.0))
+					_billboard(t, sx, ty, 0.6, 0.6, o["z"], mod2, horizon, proj_scale, col_w)
 			2:
 				if ty < 0.5:
 					continue
@@ -1882,14 +2247,14 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 			4:
 				_draw_shadow(o["pos"], o["z"], 0.3, horizon, proj_scale, fog, ty)
 				var ct: Texture2D = _view_frame("cache", o["face"], o["pos"], time * 3.0 + o["anim"])
-				_billboard(ct, sx, ty, tex3d["cache"]["L"], tex3d["cache"]["L"], o["z"], Color.WHITE.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+				_billboard(ct, sx, ty, tex3d["cache"]["L"], tex3d["cache"]["L"], o["z"], tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
 			6:
 				var sfp: Vector2 = o["pos"]
 				var sface := (pos - sfp).angle() + sin(time * 0.7 + o["anim"]) * 0.4
 				if o["freed"]:
 					sface = (lz - sfp).angle()
 				var st2: Texture2D = _view_frame("survivor", sface, sfp, time * 3.0 + o["anim"])
-				var smod := Color.WHITE.lerp(FOG, fog * 0.6)
+				var smod := tint.lerp(FOG, fog * 0.6)
 				if o["freed"]:
 					smod.a = clampf(1.2 - o["t"], 0.0, 1.0)
 				var sz: float = map.height_at(o["pos"]) if not o["freed"] else o["z"]
@@ -1901,12 +2266,12 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				_draw_shadow(o["pos"], o["z"], 0.28, horizon, proj_scale, fog, ty)
 				var itex: Texture2D = _view_frame(o["kind"], o["face"], o["pos"], time * 3.0 + o["anim"])
 				var il: float = tex3d[o["kind"]]["L"]
-				_billboard(itex, sx, ty, il, il, o["z"], Color.WHITE.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+				_billboard(itex, sx, ty, il, il, o["z"], tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
 			8:
 				_draw_shadow(o["pos"], o["z"], 0.4, horizon, proj_scale, fog, ty)
 				var bk := "beacon_on" if o["done"] else "beacon_off"
 				var btex: Texture2D = _view_frame(bk, o["face"], o["pos"], 0.0)
-				_billboard(btex, sx, ty, tex3d[bk]["L"], tex3d[bk]["L"], o["z"], Color.WHITE.lerp(FOG, fog * 0.7), horizon, proj_scale, col_w)
+				_billboard(btex, sx, ty, tex3d[bk]["L"], tex3d[bk]["L"], o["z"], tint.lerp(FOG, fog * 0.7), horizon, proj_scale, col_w)
 				var brect := _body_rect(sx, ty, 0.7, 2.6, o["z"], horizon, proj_scale)
 				if not o["done"] and o["prog"] > 0.0 and brect.size.x > 4.0:
 					var pbar := Rect2(brect.position.x - 10, brect.position.y - 12, brect.size.x + 20, 6)
@@ -1917,7 +2282,7 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var k9 := clampf(pickup_t / PICKUP_TIME, 0.0, 1.0)
 				var dz := map.height_at(lz) + lerpf(16.0, 2.8, 1.0 - pow(1.0 - k9, 3.0))
 				var dframes: Array = tex["dropship"]
-				_billboard(dframes[int(time * 12.0) % 2], sx, ty, 4.5, 4.5, dz, Color.WHITE.lerp(FOG, fog * 0.5), horizon, proj_scale, col_w)
+				_billboard(dframes[int(time * 12.0) % 2], sx, ty, 4.5, 4.5, dz, tint.lerp(FOG, fog * 0.5), horizon, proj_scale, col_w)
 			10:
 				# Green flare and light beam over the landing zone.
 				var gz := map.height_at(lz)
@@ -1933,7 +2298,7 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				_draw_shadow(mech_pos, mech_fz, 0.6, horizon, proj_scale, fog, ty)
 				var mt: Texture2D = _view_frame("mech", mech_angle, mech_pos, 0.0)
 				var ml: float = tex3d["mech"]["L"]
-				_billboard(mt, sx, ty, ml, ml, mech_fz, Color.WHITE.lerp(FOG, fog * 0.85), horizon, proj_scale, col_w)
+				_billboard(mt, sx, ty, ml, ml, mech_fz, tint.lerp(FOG, fog * 0.85), horizon, proj_scale, col_w)
 				var mrect := _body_rect(sx, ty, 1.3, 2.0, mech_fz, horizon, proj_scale)
 				if on_foot and climb_t <= 0.0 and _can_board() == 0 and fmod(time, 0.8) < 0.5:
 					_draw_brackets(mrect, Color(0.4, 1.0, 0.6))
@@ -2207,9 +2572,11 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 
 	# Retreat button
 	var rr := _retreat_rect()
-	draw_rect(rr, Color(0.15, 0.03, 0.03, 0.85) if retreat_armed > 0.0 else Color(0.05, 0.06, 0.07, 0.8))
-	draw_rect(rr, Color(0.8, 0.3, 0.2), false, 2.0)
-	_text("TAP AGAIN" if retreat_armed > 0.0 else "ABORT", rr.get_center() + Vector2(0, 7), 18, Color(1, 0.6, 0.5))
+	draw_rect(rr, Color(0.05, 0.06, 0.07, 0.8))
+	draw_rect(rr, hud, false, 2.0)
+	draw_rect(Rect2(rr.position + Vector2(18, 13), Vector2(6, 20)), hud)
+	draw_rect(Rect2(rr.position + Vector2(30, 13), Vector2(6, 20)), hud)
+	_text("MENU", rr.get_center() + Vector2(14, 7), 18, hud)
 
 	# Mech status
 	var panel := Rect2(16, 72, 150, 150)
@@ -2254,20 +2621,20 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 
 	if on_foot:
 		var fy := h * 0.955
-		_text("CARBINE  %d ROUNDS    %s" % [ammo_left["rounds"], "RUNNING" if running else "PUSH STICK ALL THE WAY TO RUN"], Vector2(w * 0.5, fy), 17, hud if ammo_left["rounds"] > 0 else Color(1, 0.3, 0.2))
+		_text("CARBINE  %s ROUNDS    %s" % [_ammo_str("rounds"), "RUNNING" if running else "PUSH STICK ALL THE WAY TO RUN"], Vector2(w * 0.5, fy), 17, hud if ammo_left["rounds"] > 0 else Color(1, 0.3, 0.2))
 		_draw_hud_messages(w, h, cc)
 		return
 
 	# Weapon status on the console
 	var cy := h * 0.955
-	var gun_txt := "SHELLS %d  L %s R %s" % [ammo_left["shells"], "●" if parts["left_arm"] > 0.0 else "✕", "●" if parts["right_arm"] > 0.0 else "✕"]
+	var gun_txt := "SHELLS %s  L %s R %s" % [_ammo_str("shells"), "●" if parts["left_arm"] > 0.0 else "✕", "●" if parts["right_arm"] > 0.0 else "✕"]
 	_text(gun_txt, Vector2(w * 0.5 - 130, cy), 18, hud if ammo_left["shells"] > 0 else Color(1, 0.3, 0.2))
 	var bar := Rect2(w * 0.5 + 10, cy - 15, 180, 16)
 	var rk_ready := clampf(1.0 - rocket_cd / GameState.rocket_cooldown(), 0.0, 1.0)
 	draw_rect(bar, Color(0, 0, 0, 0.6))
 	draw_rect(Rect2(bar.position, Vector2(bar.size.x * rk_ready, bar.size.y)), Color(1.0, 0.6, 0.15) if rk_ready >= 1.0 else Color(0.5, 0.35, 0.15))
 	draw_rect(bar, hud, false, 1.0)
-	_text(("%d ROCKETS" % ammo_left["rockets"]) + (" READY" if rk_ready >= 1.0 else " · RELOADING"), bar.get_center() + Vector2(0, 30), 14, hud if ammo_left["rockets"] > 0 else Color(1, 0.3, 0.2))
+	_text(("%s ROCKETS" % _ammo_str("rockets")) + (" READY" if rk_ready >= 1.0 else " · RELOADING"), bar.get_center() + Vector2(0, 30), 14, hud if ammo_left["rockets"] > 0 else Color(1, 0.3, 0.2))
 
 	_draw_hud_messages(w, h, cc)
 
@@ -2290,7 +2657,7 @@ func _draw_hud_messages(w: float, h: float, cc: Vector2) -> void:
 		var a2: float = clampf(d["t"], 0.0, 1.0)
 		draw_colored_polygon(PackedVector2Array([p + v * 22.0, p - v * 6.0 + n * 26.0, p - v * 6.0 - n * 26.0]), Color(1, 0.15, 0.1, a2 * 0.85))
 
-	if time < 9.0 and state == State.PLAYING:
+	if time < 9.0 and state == State.PLAYING and Settings.show_hints:
 		var fade := clampf(9.0 - time, 0.0, 1.0)
 		_text("LEFT THUMB: WALK     RIGHT SIDE: DRAG TO AIM     HOLD FIRE: GUNS", Vector2(w * 0.5, h * 0.82), 18, Color(1, 1, 1, 0.7 * fade))
 
@@ -2414,7 +2781,8 @@ func _draw_minimap(w: float) -> void:
 	draw_rect(mm, Color(0.2, 0.5, 0.3), false, 2.0)
 	# Altitude readout under the minimap.
 	_text("ELEV %+.1f" % floor_z, Vector2(mm.get_center().x, mm.end.y + 20.0), 15, Color(0.4, 1.0, 0.6, 0.8))
-	_text("SCRAP %d · CIRC %d · BIO %d" % [loot["scrap"], loot["circuits"], loot["biomass"]], Vector2(mm.get_center().x, mm.end.y + 102.0), 14, Color(0.9, 0.85, 0.6, 0.9))
+	if not survival:
+		_text("SCRAP %d · CIRC %d · BIO %d" % [loot["scrap"], loot["circuits"], loot["biomass"]], Vector2(mm.get_center().x, mm.end.y + 102.0), 14, Color(0.9, 0.85, 0.6, 0.9))
 
 
 func _draw_touch_controls(w: float, h: float) -> void:
@@ -2443,6 +2811,9 @@ func _draw_touch_controls(w: float, h: float) -> void:
 func _draw_end_screen(w: float, h: float) -> void:
 	var k := clampf(end_time / 0.8, 0.0, 1.0)
 	draw_rect(Rect2(0, 0, w, h), Color(0, 0, 0, 0.65 * k))
+	if survival:
+		_draw_survival_end(w, h, k)
+		return
 	var title := "EXTRACTED"
 	var col := Color(0.4, 1.0, 0.6)
 	if state == State.LOST:
@@ -2467,3 +2838,25 @@ func _draw_end_screen(w: float, h: float) -> void:
 	if end_time > 1.2:
 		var blink := 0.5 + 0.5 * sin(time * 4.0)
 		_text("TAP TO FLY HOME TO THE ROCK", Vector2(w * 0.5, h * 0.84), 24, Color(1, 0.85, 0.3, blink))
+
+
+func _draw_survival_end(w: float, h: float, k: float) -> void:
+	var title := "RUN OVER"
+	if state == State.LOST:
+		title = "PILOT DOWN" if pilot_down else "BRIGID DOWN"
+	_text(title, Vector2(w * 0.5, h * 0.28), 54, Color(1.0, 0.45, 0.25, k))
+	_text("Survival — " + String(zone_theme["name"]), Vector2(w * 0.5, h * 0.35), 22, Color(1, 1, 1, 0.8 * k))
+	_text("WAVE %d" % wave, Vector2(w * 0.5, h * 0.5), 64, Color(1.0, 0.85, 0.3, k))
+	_text("%d aliens killed" % kills, Vector2(w * 0.5, h * 0.58), 26, Color(1, 1, 1, k))
+	if new_best:
+		var glow := 0.6 + 0.4 * sin(time * 6.0)
+		_text("NEW BEST!", Vector2(w * 0.5, h * 0.67), 34, Color(0.4, 1.0, 0.6, k * glow))
+	else:
+		_text("Best: wave %d · %d kills" % [int(best_before["wave"]), int(best_before["kills"])], Vector2(w * 0.5, h * 0.67), 22, Color(0.8, 0.85, 0.8, k))
+	if end_time > 1.2:
+		var blink := 0.5 + 0.5 * sin(time * 4.0)
+		_text("TAP TO RETURN TO THE MENU", Vector2(w * 0.5, h * 0.84), 24, Color(1, 0.85, 0.3, blink))
+
+
+func _ammo_str(kind: String) -> String:
+	return "∞" if survival else str(ammo_left[kind])

@@ -5,12 +5,43 @@ extends Control
 
 const SLOT_ANCHORS := [Vector2(0.13, 0.47), Vector2(0.29, 0.47), Vector2(0.80, 0.66), Vector2(0.74, 0.47), Vector2(0.47, 0.56), Vector2(0.625, 0.17)]
 
+signal site_pressed(index: int)
+
 var t := 0.0
+var selected := -1
+var show_markers := false
 
 
 func _process(delta: float) -> void:
 	t += delta
 	queue_redraw()
+
+
+func _marker_pos(i: int) -> Vector2:
+	return _p(SLOT_ANCHORS[i].x, SLOT_ANCHORS[i].y) + Vector2(0, 20.0 * _scale())
+
+
+func _scale() -> float:
+	return clampf(size.x / 400.0, 0.8, 2.0)
+
+
+func _gui_input(event: InputEvent) -> void:
+	if not show_markers:
+		return
+	var tapped: bool = (event is InputEventScreenTouch and event.pressed) or (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT)
+	if not tapped:
+		return
+	# Nearest site to the tap, if it's close enough to a marker or its building.
+	var best := -1
+	var best_d := 1e9
+	for i in GameState.slots.size():
+		var d := minf(event.position.distance_to(_marker_pos(i)), event.position.distance_to(_p(SLOT_ANCHORS[i].x, SLOT_ANCHORS[i].y) + Vector2(0, -12) * _scale()))
+		if d < best_d:
+			best_d = d
+			best = i
+	if best >= 0 and best_d < 48.0 * _scale():
+		site_pressed.emit(best)
+		accept_event()
 
 
 func _p(fx: float, fy: float) -> Vector2:
@@ -115,10 +146,13 @@ func _draw() -> void:
 	draw_circle(g + Vector2(10, -3), 2.0, Color(0.6, 0.9, 1.0))
 
 	# Built modules
+	var sc := _scale()
 	for i in GameState.slots.size():
 		var s: Dictionary = GameState.slots[i]
 		if s.has("type"):
-			_draw_module(s["type"], s["level"], _p(SLOT_ANCHORS[i].x, SLOT_ANCHORS[i].y))
+			draw_set_transform(_p(SLOT_ANCHORS[i].x, SLOT_ANCHORS[i].y), 0.0, Vector2(sc, sc))
+			_draw_module(s["type"], s["level"], Vector2.ZERO)
+			draw_set_transform(Vector2.ZERO)
 
 	# Gulls
 	for i in 3:
@@ -127,7 +161,41 @@ func _draw() -> void:
 		var flap := 3.0 + sin(t * 8.0 + i) * 2.0
 		draw_polyline(PackedVector2Array([Vector2(gx - 6, gy - flap), Vector2(gx, gy), Vector2(gx + 6, gy - flap)]), Color(0.95, 0.95, 0.95), 1.5)
 
+	if show_markers:
+		_draw_markers()
 	draw_rect(Rect2(Vector2.ZERO, size), Color(0.2, 0.45, 0.3), false, 2.0)
+
+
+func _draw_markers() -> void:
+	## Numbered site markers you can tap. Empty sites show a "+".
+	var font := ThemeDB.fallback_font
+	var sc := _scale()
+	for i in GameState.slots.size():
+		var s: Dictionary = GameState.slots[i]
+		var c := _marker_pos(i)
+		var r := 13.0 * sc
+		var built := s.has("type")
+		var sel := i == selected
+		var short_staffed := built and GameState.crew_required(i) > int(s.get("crew", 0))
+		if sel:
+			var pulse := 0.5 + 0.5 * sin(t * 5.0)
+			draw_circle(c, r + 6.0 + pulse * 3.0, Color(0.4, 1.0, 0.6, 0.25))
+		draw_circle(c, r, Color(0.05, 0.1, 0.08, 0.85))
+		draw_arc(c, r, 0, TAU, 24, Color(0.4, 1.0, 0.6) if sel else (Color(0.85, 0.9, 0.85) if built else Color(0.85, 0.9, 0.85, 0.5)), 2.5 if sel else 1.5)
+		var txt := str(i + 1) if built else "+"
+		var fs := int(15 * sc)
+		var tw := font.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+		draw_string(font, c + Vector2(-tw * 0.5, fs * 0.36), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color.WHITE if built else Color(0.8, 0.9, 0.85, 0.8))
+		if short_staffed:
+			draw_circle(c + Vector2(r * 0.8, -r * 0.8), 4.0 * sc, Color(1.0, 0.7, 0.2))
+		if sel or not built:
+			var label_txt: String = GameState.BUILDINGS[s["type"]]["name"] if built else GameState.SLOT_NAMES[i]
+			var nfs := int(12 * sc)
+			var nw := font.get_string_size(label_txt, HORIZONTAL_ALIGNMENT_LEFT, -1, nfs).x
+			var np := c + Vector2(-nw * 0.5, r + nfs + 2.0)
+			np.x = clampf(np.x, 4.0, size.x - nw - 4.0)
+			draw_rect(Rect2(np + Vector2(-4, -nfs), Vector2(nw + 8, nfs + 5)), Color(0, 0, 0, 0.55))
+			draw_string(font, np, label_txt, HORIZONTAL_ALIGNMENT_LEFT, -1, nfs, Color(1, 1, 1, 0.9) if sel else Color(0.8, 0.85, 0.8, 0.7))
 
 
 func _draw_module(type: String, level: int, a: Vector2) -> void:

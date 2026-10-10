@@ -67,9 +67,41 @@ and only bite you when they're on your level.
   change a song's tempo, scale, chords or instruments. After editing,
   bump `CACHE_VERSION` so the cached audio is rebuilt.
 
+## Main menu
+- **Survival** (first button): endless waves on a random zone, infinite
+  ammunition, a stock Brigid, repair drones patch 15% between waves.
+  Waves grow bigger and every third wave the swarm gets tougher. Your best
+  wave is saved. Just for fun: it never touches the campaign.
+- **Continue / New Game / Load Game:** three campaign save slots (the game
+  saves itself after every change). Load Game can also delete a slot.
+- **Settings:** music and effects volume, look sensitivity, graphics
+  (Low/Medium/High = 120/160/200 screen columns), control hints.
+- **Quit.**
+- In battle, the MENU button (top-left, or Esc) pauses: Resume, Settings,
+  Abort mission / End run, Quit to main menu. The game also pauses when
+  the phone sends it to the background.
+- At the Rock, ☰ (top-left) opens Resume, Settings, Save & quit.
+
+## Zones (themes)
+Every mission picks a zone look from its seed, so no two drops look the
+same: sky, light, fog, wall colours, weather, the shape of the map and
+the scenery. Defined in `scripts/battle/themes.gd`.
+| Zone | Layout | Weather | Scenery |
+|---|---|---|---|
+| Coastal Ruins · Dawn | ruins | clear | rocks, crystals, barrels |
+| Drowned City · Night Rain | town: street grid, tall blocks, lit windows | rain | wrecked cars |
+| Sunlit Quarry · Noon | quarry: deep pits, high ground | dust | rocks, cars |
+| Snowbound Village · Overcast | village: small houses, fences | snow | pine trees |
+| Bog Forest · Dusk Mist | forest: few buildings, dense trees | fireflies | trees, pines |
+| Industrial Docks · Smog | industrial: big sheds, containers | ash | barrels, cars |
+| Infested Zone · Alien Night | ruins overgrown by alien growth | spores | crystals |
+
+Brigid walks through scenery: cars crumple, trees fall, and barrels
+explode (and hurt nearby aliens). Rockets wreck them too.
+
 ## Campaign loop
 See [STORY.md](STORY.md) for the world, the characters and the story.
-1. **Map room:** pick an operation (story missions are marked ★). Each
+1. **Missions tab:** pick an operation (story missions are marked ★). Each
    costs dropship fuel; Coast Patrol is always free.
 2. **Air drop:** the Gannet drops Brigid into the zone, loaded with as much
    ammunition as she can carry from the stockpile.
@@ -166,7 +198,20 @@ flow field (pathfinding toward the player).
   T/G or PageUp/PageDown look up/down, Space fire, R or F rockets,
   X exit/board, Shift run on foot.
 
+## The Rock's screen
+See [docs/UI_STUDY.md](docs/UI_STUDY.md) for the study behind it. Resource
+chips along the top, one tab's content in the middle, the crew's chatter
+in a radio strip, and four big tabs at the bottom: **Missions** (cards
+coloured by type, briefing on the right, LAUNCH always visible),
+**Base** (tap a numbered site on the drawing of the Rock to manage it),
+**Brigid** (armour and ammunition) and **Lab** (research). Tabs show
+hints like "3 idle" or "! repair".
+
 ## Roadmap
+- **3.0:** main menu (Survival, Continue, New Game, Load Game with 3 slots,
+  Settings, Quit), pause menu in battle, endless Survival mode with infinite
+  ammo, redesigned base screen, seven zone themes with weather, map layouts
+  and scenery (trees, wrecked cars, explosive barrels).
 - **2.1:** solid-looking sprites: 3D-modelled, 8-direction views, walk
   cycles, ground shadows.
 - **2.0:** story campaign (12 missions, 3 acts, cast of 6), the Rock as a
@@ -194,8 +239,11 @@ flow field (pathfinding toward the player).
 - `scripts/battle/level_map.gd`: grid map generation, raycasting, pathfinding.
 - `scripts/battle/model_art.gd`: tiny 3D model renderer and the models.
 - `scripts/battle/alien_art.gd`: flat painted sprites (rocks, crystals, dropship).
-- `scripts/base/base.gd`: the Rock: map room, modules and people, Brigid, lab.
-- `scripts/base/rock_scene.gd`: animated drawing of the Rock.
+- `scripts/battle/themes.gd`: zone looks (colours, weather, layout, scenery).
+- `scripts/menu/menu.gd`: main menu, save slots.
+- `scripts/settings.gd`: settings and the settings panel (autoload).
+- `scripts/base/base.gd`: the Rock: missions, base sites and people, Brigid, lab.
+- `scripts/base/rock_scene.gd`: animated drawing of the Rock with tappable sites.
 - `scripts/story.gd`: all the writing: cast, missions, radio, chatter.
 - `scripts/game_state.gd`: resources, ammo, modules, crew, research, operations, save (autoload).
 - `scripts/sfx.gd`: generated sound effects (autoload).

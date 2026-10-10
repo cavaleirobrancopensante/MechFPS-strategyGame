@@ -5,8 +5,10 @@ extends Node
 
 const Story = preload("res://scripts/story.gd")
 
-const VERSION := "2.1"
-const SAVE_PATH := "user://rock_save.cfg"
+const VERSION := "3.0"
+const SLOT_COUNT := 3
+const META_PATH := "user://meta.cfg"
+const OLD_SAVE_PATH := "user://rock_save.cfg"
 
 # --- Mech ---------------------------------------------------------------------
 const PARTS := ["torso", "left_arm", "right_arm", "legs"]
@@ -65,10 +67,102 @@ var missions_won := 0
 var kills_total := 0
 var chatter_i := 0
 
+## "campaign" or "survival". Survival never touches the campaign save.
+var mode := "campaign"
+var slot := 1
+var last_slot := 0
+var survival_best := {"wave": 0, "kills": 0}
+
 
 func _ready() -> void:
 	new_campaign(false)
+	_load_meta()
+	# Older versions kept one save: move it into slot 1.
+	if FileAccess.file_exists(OLD_SAVE_PATH) and not FileAccess.file_exists(slot_path(1)):
+		DirAccess.rename_absolute(OLD_SAVE_PATH, slot_path(1))
+		if last_slot == 0:
+			last_slot = 1
+			_save_meta()
+
+
+# =============================================================================
+# Save slots and modes
+# =============================================================================
+
+func slot_path(i: int) -> String:
+	return "user://rock_slot_%d.cfg" % i
+
+
+func slot_summary(i: int) -> Dictionary:
+	## {} if empty, else {day, story, people, saved_at}.
+	var cf := ConfigFile.new()
+	if cf.load(slot_path(i)) != OK:
+		return {}
+	var story_i: int = cf.get_value("rock", "story_index", 0)
+	var title := "Campaign complete" if story_i >= Story.STORY_MISSIONS.size() else "Next: " + String(Story.STORY_MISSIONS[story_i]["title"])
+	return {"day": cf.get_value("rock", "day", 1), "story": title, "people": cf.get_value("rock", "survivors", 0), "saved_at": cf.get_value("rock", "saved_at", "")}
+
+
+func start_new_game(i: int) -> void:
+	slot = i
+	mode = "campaign"
+	new_campaign(true)
+	last_slot = i
+	_save_meta()
+
+
+func load_slot(i: int) -> bool:
+	if not FileAccess.file_exists(slot_path(i)):
+		return false
+	slot = i
+	mode = "campaign"
+	new_campaign(false)
 	load_game()
+	last_slot = i
+	_save_meta()
+	return true
+
+
+func delete_slot(i: int) -> void:
+	if FileAccess.file_exists(slot_path(i)):
+		DirAccess.remove_absolute(slot_path(i))
+	if last_slot == i:
+		last_slot = 0
+		_save_meta()
+
+
+func start_survival() -> void:
+	# Survival runs on a fresh, stock Brigid: campaign upgrades don't carry
+	# over (the campaign itself stays safe in its save slot).
+	new_campaign(false)
+	slot = 0
+	mode = "survival"
+	current_mission = {"title": "Survival", "zone": "", "type": "endless", "diff": 1, "fuel": 0,
+		"seed": randi(), "reward": {}, "briefing": []}
+	loadout = {"shells": 999999, "rockets": 999999, "rounds": 999999}
+
+
+func record_survival(wave: int, kills: int) -> bool:
+	var best := wave > int(survival_best["wave"]) or (wave == int(survival_best["wave"]) and kills > int(survival_best["kills"]))
+	if best:
+		survival_best = {"wave": wave, "kills": kills}
+		_save_meta()
+	return best
+
+
+func _save_meta() -> void:
+	var cf := ConfigFile.new()
+	cf.set_value("meta", "last_slot", last_slot)
+	cf.set_value("meta", "survival_best", survival_best)
+	cf.save(META_PATH)
+
+
+func _load_meta() -> void:
+	var cf := ConfigFile.new()
+	if cf.load(META_PATH) != OK:
+		return
+	last_slot = cf.get_value("meta", "last_slot", 0)
+	survival_best = cf.get_value("meta", "survival_best", survival_best)
 
 
 func new_campaign(save := true) -> void:
@@ -616,16 +710,19 @@ func apply_mission_result(r: Dictionary) -> void:
 # =============================================================================
 
 func save_game() -> void:
+	if mode != "campaign":
+		return
 	var cf := ConfigFile.new()
+	cf.set_value("rock", "saved_at", Time.get_datetime_string_from_system(false, true))
 	for key in ["day", "res", "ammo", "survivors", "slots", "ammo_focus", "research", "part_hp", "story_index",
 			"operations", "current_mission", "loadout", "last_report", "missions_won", "kills_total", "chatter_i"]:
 		cf.set_value("rock", key, get(key))
-	cf.save(SAVE_PATH)
+	cf.save(slot_path(slot))
 
 
 func load_game() -> void:
 	var cf := ConfigFile.new()
-	if cf.load(SAVE_PATH) != OK:
+	if cf.load(slot_path(slot)) != OK:
 		return
 	for key in ["day", "survivors", "ammo_focus", "story_index", "missions_won", "kills_total", "chatter_i"]:
 		set(key, cf.get_value("rock", key, get(key)))

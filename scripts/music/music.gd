@@ -64,6 +64,7 @@ func _ready() -> void:
 	_load_settings()
 	_player = AudioStreamPlayer.new()
 	_player.volume_db = VOLUME_DB
+	_player.bus = "Music"
 	add_child(_player)
 	_build_ui()
 	_request(current)
