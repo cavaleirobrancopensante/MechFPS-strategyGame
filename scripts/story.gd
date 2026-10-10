@@ -47,7 +47,7 @@ const STORY_MISSIONS := [
 		"diff": 2, "fuel": 1, "reward": {"fuel": 6, "scrap": 10},
 		"briefing": [
 			["rafa", "Bad news: the Gannet drinks fuel like I drink coffee. Good news: there's a depot."],
-			["quill", "Four intact canisters at Shannonmouth. Grab them, the drones will lift them out."],
+			["quill", "Four intact canisters at Shannonmouth. Climb out, carry them to the Chest, and we'll winch it all up."],
 			["sandoval", "If you see anything unusual in the hives there, I want a description. A detailed one."],
 		],
 		"debrief": [
@@ -86,7 +86,7 @@ const STORY_MISSIONS := [
 		"act": 2, "title": "Sandoval's Sample", "zone": "Lough Derra Shore", "type": "destroy", "hives": 2,
 		"diff": 3, "fuel": 2, "reward": {"biomass": 30, "circuits": 4},
 		"briefing": [
-			["sandoval", "I need hive tissue. Lots of it. Kill two hives and the drones will scoop up what's left."],
+			["sandoval", "I need hive tissue. Lots of it. Kill two hives, put on the hazmat suit and cut out what's left. Bring it back in the Chest."],
 			["mags", "He means it as a compliment, Wren. He thinks you're a very good blender."],
 			["quill", "Two hives on the lough shore. Brutes reported. Watch your armour."],
 		],
@@ -266,7 +266,7 @@ const RADIO := {
 	],
 	"rescue": [
 		["anselm", "Bless you, Wren. One more for the table."],
-		["pip", "Survivor's safe! They're running for the drone."],
+		["pip", "Survivor's with you! Walk them back to the Chest and strap them in."],
 	],
 	"hive": [
 		["quill", "Hive down. Good work."],
