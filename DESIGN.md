@@ -37,8 +37,13 @@ Hits are directional: attacks from the left hit the left arm more, from
 behind hit the legs, from the front hit the torso.
 
 ## Weapons
-- **Twin autocannons:** hold FIRE. Arms alternate shots. Hitscan, auto-aims vertically.
-- **Rocket pod:** splash damage, reload timer. Homes onto the locked target.
+- **Twin autocannons:** hold FIRE. Arms alternate shots. Each shot goes exactly
+  where the crosshair points (small spread). Look down to hit crawlers.
+  Missed shots hit the ground, a wall, or fly into the sky.
+- **Rocket pod:** splash damage, reload timer. Flies along the crosshair line:
+  aim low to blast the ground in front of a swarm.
+
+Red corner brackets appear when the crosshair is on an alien.
 
 ## Aliens
 | Alien | Behaviour |
@@ -60,13 +65,14 @@ flow field (pathfinding toward the player).
 
 ## Controls
 - **Phone:** left thumb anywhere on the left side = walking joystick;
-  drag on the right side to turn; hold FIRE (sliding on it also turns);
-  tap RKT for rockets.
+  drag on the right side to turn and look up/down; hold FIRE (sliding on
+  it also aims); tap RKT for rockets.
 - **Keyboard (testing):** WASD walk/strafe, arrows or Q/E turn,
-  Space fire, R or F rockets.
+  T/G or PageUp/PageDown look up/down, Space fire, R or F rockets.
 
 ## Roadmap
-- **1.0a (this build):** cockpit raycaster, minimap, 3 alien types +
+- **1.1:** look up/down, shots and rockets go where the crosshair points.
+- **1.0a:** cockpit raycaster, minimap, 3 alien types +
   hives, destructible parts, rockets, hangar repairs and upgrades, save.
 - **Next ideas:**
   - Mission types: defend a convoy, escape before the timer, boss hive queen.
