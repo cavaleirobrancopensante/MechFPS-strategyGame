@@ -13,4 +13,4 @@ models, images or audio files (textures are generated at start-up), and even the
 - See [STORY.md](STORY.md) for the world and characters, and
   [DESIGN.md](DESIGN.md) for the game design, controls and roadmap.
 
-Version: **1.4**
+Version: **1.5**

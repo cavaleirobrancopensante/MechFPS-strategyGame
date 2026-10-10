@@ -5,7 +5,7 @@ extends Node
 
 const Story = preload("res://scripts/story.gd")
 
-const VERSION := "1.4"
+const VERSION := "1.5"
 const SLOT_COUNT := 3
 const META_PATH := "user://meta.cfg"
 const OLD_SAVE_PATH := "user://rock_save.cfg"

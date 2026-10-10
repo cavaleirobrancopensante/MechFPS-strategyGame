@@ -268,6 +268,16 @@ hints like "3 idle" or "! repair".
 Version numbers were reset in October 2026: the game is now **1.4** and
 from here on only the number after the point goes up (1.5, 1.6, ...).
 Entries below 1.4 marked "old" use the earlier numbering.
+- **1.5:** everything else rebuilt as real 3D models and photographed the
+  same way (`scripts/models3d.gd`): crawler (six-legged, plated, mandibles),
+  spitter (digitigrade, glowing acid sac), brute (armoured, knuckle-walking),
+  flyer (wasp with glassy wings), burrower (plated digger with plough snout)
+  and its dirt mound, hive and Brood Mother (flesh sacs, pustules, bone
+  spikes, tentacles); carcasses lying on their backs or sides; Brigid seen
+  from outside (also on the menu); the Chest; crates, fuel canisters, data
+  cases, relay beacons, trees, wrecked cars, oil drums, scrap, circuits and
+  biomass jars. Animations: 6-frame walks, wing beats, pulsing nests. The
+  Chest now lands behind Brigid instead of in front of her.
 - **1.4:** people and guns rebuilt as real 3D models (Godot's own renderer
   photographs them into sprites, `scripts/baker.gd`, cached on the phone):
   survivors in three outfits with waving and walking animations, the
