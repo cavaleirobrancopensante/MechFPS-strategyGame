@@ -998,6 +998,8 @@ func _input(event: InputEvent) -> void:
 		var p: Vector2 = event.position
 		var s := get_viewport_rect().size
 		if event.pressed:
+			if Music.covers(p):
+				return
 			if state != State.PLAYING:
 				if end_time > 1.2:
 					get_tree().change_scene_to_file("res://scenes/hangar.tscn")
@@ -1649,7 +1651,7 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 
 	# Objective bar
 	var obj := "MISSION %d    HIVES %d/%d    KILLS %d    CACHES %d/%d" % [mission_no, hives_destroyed, hives_total, kills, caches_found, caches.size()]
-	_text(obj, Vector2(w * 0.5, h * 0.06), 22, hud)
+	_text(obj, Vector2(w * 0.5, h * 0.06 + 30.0), 20, hud)
 
 	# Retreat button
 	var rr := _retreat_rect()
