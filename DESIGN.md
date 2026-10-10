@@ -248,11 +248,12 @@ flow field (pathfinding toward the player).
 - **Phone:** left thumb anywhere on the left side = walking joystick;
   drag on the right side to turn and look up/down; hold FIRE (sliding on
   it also aims); tap RKT for rockets; EXIT MECH / CLIMB IN under the minimap.
+  Hold JETS (above FIRE) to fly Brigid up with her jump jets.
   On foot the RKT button becomes JUMP, and AIM (above FIRE) raises the
   carbine to your eye.
 - **Keyboard (testing):** WASD walk/strafe, arrows or Q/E turn,
   T/G or PageUp/PageDown look up/down, Space fire, R or F rockets,
-  X exit/board, Shift run on foot, J jump, C context action, right mouse
+  X exit/board, Shift run on foot, J jump, C context action, V jump jets, right mouse
   button (hold) to aim down the sight.
 
 ## The Rock's screen
@@ -278,6 +279,11 @@ Entries below 1.4 marked "old" use the earlier numbering.
   cases, relay beacons, trees, wrecked cars, oil drums, scrap, circuits and
   biomass jars. Animations: 6-frame walks, wing beats, pulsing nests. The
   Chest now lands behind Brigid instead of in front of her.
+  Fix: Brigid could get trapped in trenches (and the Chest could block the
+  way out). The Chest no longer blocks anyone, and Brigid has **jump jets**:
+  hold JETS (key V) to rise over walls and out of pits. The tank holds 5
+  seconds of thrust and refills slowly on the ground; hard landings from
+  high up hurt the legs.
 - **1.4:** people and guns rebuilt as real 3D models (Godot's own renderer
   photographs them into sprites, `scripts/baker.gd`, cached on the phone):
   survivors in three outfits with waving and walking animations, the

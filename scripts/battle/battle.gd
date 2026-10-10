@@ -92,6 +92,16 @@ var hands_msg_cd := 0.0
 var jump_z := 0.0             ## height above the ground while jumping (on foot)
 var jump_v := 0.0
 var want_jump := false
+## Brigid's jump jets: hold JETS to climb out of pits and over walls. The tank
+## burns fast and refills slowly, so you can't fly everywhere.
+const JET_TANK := 5.0          ## seconds of thrust
+const JET_REFILL := 0.18       ## seconds of thrust regained per second
+const JET_ACCEL := 24.0
+const JET_MAX_UP := 4.0
+var jet_fuel := JET_TANK
+var jets_held := false
+var jets_touch := -1
+var jet_snd_cd := 0.0
 const MAX_JARS := 6
 ## The harvest team: volunteers riding in the Chest who climb out in hazmat
 ## suits and cut biomass from nearby carcasses whenever the area is quiet.
@@ -645,17 +655,31 @@ func _update_player(delta: float) -> void:
 			jump_v = JUMP_V
 			jump_z = 0.001
 			Sfx.play("step", -10.0, 0.1, 1.6)
-		want_jump = false
-		if jump_z > 0.0:
-			jump_v -= GRAVITY * delta
-			jump_z += jump_v * delta
-			# In the air you clear whatever you've jumped above.
-			stand = maxf(stand, floor_z + jump_z)
+	want_jump = false
+	var thrust := not on_foot and (jets_held or Input.is_physical_key_pressed(KEY_V)) and jet_fuel > 0.0
+	if thrust:
+		if jump_z <= 0.0:
+			jump_z = 0.001
+			jump_v = maxf(jump_v, 1.5)
+		jump_v = minf(jump_v + JET_ACCEL * delta, JET_MAX_UP)
+		jet_fuel = maxf(0.0, jet_fuel - delta)
+		shake = maxf(shake, 2.5)
+		jet_snd_cd -= delta
+		if jet_snd_cd <= 0.0:
+			jet_snd_cd = 0.22
+			Sfx.play("rocket", -12.0, 0.1, 0.55)
+	elif jump_z <= 0.0:
+		jet_fuel = minf(JET_TANK, jet_fuel + JET_REFILL * delta)
+	if jump_z > 0.0:
+		jump_v -= GRAVITY * delta
+		jump_z += jump_v * delta
+		# In the air you clear whatever you've jumped above.
+		stand = maxf(stand, floor_z + jump_z)
 	var nx := pos + Vector2(mv.x, 0.0)
-	if not map.blocked(nx, body_r, stand, step_h) and not _parked_mech_blocks(nx, body_r) and not (_chest_blocks(nx, body_r) and not _chest_blocks(pos, body_r)):
+	if not map.blocked(nx, body_r, stand, step_h) and not _parked_mech_blocks(nx, body_r):
 		pos = nx
 	var ny := pos + Vector2(0.0, mv.y)
-	if not map.blocked(ny, body_r, stand, step_h) and not _parked_mech_blocks(ny, body_r) and not (_chest_blocks(ny, body_r) and not _chest_blocks(pos, body_r)):
+	if not map.blocked(ny, body_r, stand, step_h) and not _parked_mech_blocks(ny, body_r):
 		pos = ny
 
 	# Climb steps smoothly; drop off ledges with a heavy landing.
@@ -666,9 +690,16 @@ func _update_player(delta: float) -> void:
 			jump_z = maxf(0.0, jump_z - (target - floor_z))
 			floor_z = target
 		if jump_z <= 0.0 or (jump_v < 0.0 and floor_z + jump_z <= target):
+			if not on_foot:
+				# Brigid comes down hard; a long fall jars the legs.
+				shake = maxf(shake, clampf(-jump_v * 2.5, 4.0, 20.0))
+				Sfx.play("step", -2.0, 0.05, 0.8)
+				if jump_v < -7.0:
+					parts["legs"] = maxf(0.0, parts["legs"] - (-jump_v - 7.0) * 3.0)
+			else:
+				Sfx.play("step", -8.0, 0.1, 1.3)
 			jump_z = 0.0
 			jump_v = 0.0
-			Sfx.play("step", -8.0, 0.1, 1.3)
 	if target < floor_z - 0.3 and jump_z <= 0.0:
 		falling = true
 	if target > floor_z:
@@ -2271,6 +2302,9 @@ func _action_rect(s: Vector2) -> Rect2:
 func _toggle_mech() -> void:
 	if state != State.PLAYING or climb_t > 0.0:
 		return
+	if jump_z > 0.0:
+		_show_msg("LAND FIRST", 1.0)
+		return
 	if on_foot:
 		_start_board()
 	else:
@@ -2337,6 +2371,8 @@ func _start_board() -> void:
 
 
 func _stop_inputs() -> void:
+	jets_touch = -1
+	jets_held = false
 	fire_touch = -1
 	move_touch = -1
 	look_touch = -1
@@ -2440,6 +2476,10 @@ func _input(event: InputEvent) -> void:
 				return
 			if climb_t > 0.0 or phase == "drop" or phase == "lift":
 				return
+			if not on_foot and climb_t <= 0.0 and phase != "drop" and phase != "lift" and p.distance_to(_aim_center(s)) < AIM_R * 1.2:
+				jets_touch = event.index
+				jets_held = true
+				return
 			if on_foot and climb_t <= 0.0 and p.distance_to(_aim_center(s)) < AIM_R * 1.2:
 				ads_on = not ads_on
 				Sfx.play("click", -6.0)
@@ -2470,6 +2510,9 @@ func _input(event: InputEvent) -> void:
 				look_touch = -1
 			if event.index == fire_touch:
 				fire_touch = -1
+			if event.index == jets_touch:
+				jets_touch = -1
+				jets_held = false
 	elif event is InputEventScreenDrag and state == State.PLAYING and climb_t <= 0.0:
 		if event.index == move_touch:
 			var v: Vector2 = (event.position - move_origin) / JOY_RADIUS
@@ -2549,6 +2592,8 @@ func _set_paused(on: bool) -> void:
 	paused = on
 	get_tree().paused = on
 	pause_layer.visible = on
+	jets_held = false
+	jets_touch = -1
 	fire_touch = -1
 	move_touch = -1
 	look_touch = -1
@@ -4255,6 +4300,11 @@ func _draw_touch_controls(w: float, h: float) -> void:
 		cv.draw_arc(jc, ROCKET_R, 0, TAU, 40, Color(0.6, 0.85, 1.0, 0.9), 3.0)
 		_text("JUMP", jc + Vector2(0, 7), 20, Color(1, 1, 1, 0.85))
 		return
+	var jc2 := _aim_center(Vector2(w, h))
+	var fuel_k := jet_fuel / JET_TANK
+	cv.draw_circle(jc2, AIM_R, Color(0.3, 0.6, 1.0, 0.45 if jets_held else 0.18))
+	cv.draw_arc(jc2, AIM_R, -PI * 0.5, -PI * 0.5 + TAU * fuel_k, 40, Color(0.5, 0.8, 1.0, 0.95) if fuel_k > 0.25 else Color(1.0, 0.45, 0.3, 0.95), 4.0)
+	_text("JETS", jc2 + Vector2(0, 7), 17, Color(1, 1, 1, 0.85 if jet_fuel > 0.0 else 0.35))
 	var rc := _rocket_center(Vector2(w, h))
 	var rk_ready := clampf(1.0 - rocket_cd / GameState.rocket_cooldown(), 0.0, 1.0)
 	cv.draw_circle(rc, ROCKET_R, Color(1.0, 0.55, 0.1, 0.4 if rk_ready >= 1.0 else 0.15))
