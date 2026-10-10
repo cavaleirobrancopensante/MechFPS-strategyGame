@@ -62,6 +62,7 @@ func _build() -> void:
 	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
 	for side in ["left", "right", "top", "bottom"]:
 		margin.add_theme_constant_override("margin_" + side, 20)
+	margin.add_theme_constant_override("margin_top", 48)  # room for the music player
 	add_child(margin)
 	_root_box = margin
 

@@ -48,6 +48,20 @@ and only bite you when they're on your level.
 - Aliens hunt the pilot, not the empty mech. If the pilot dies the
   mission is lost and the recovery crew brings everyone home.
 
+## Music
+- 20 songs, each composed and synthesised in code: drums, bass, pad,
+  arpeggio and a lead melody (motif → repeat → resolve → higher B part,
+  then loop). Each song has its own tempo, scale, chord progression,
+  drum style, bass style and lead sound.
+- Player bar at the top of every screen: ◀◀ previous, tap the title for
+  the song list, ▶▶ next, ❚❚ pause. It remembers your song and plays each
+  one twice before moving to the next.
+- Songs are composed in the background the first time (about a second
+  each on a PC, a few seconds on a phone), then cached on the device.
+- Song list lives in `scripts/music/music.gd` (`SONGS`); edit a line to
+  change a song's tempo, scale, chords or instruments. After editing,
+  bump `CACHE_VERSION` so the cached audio is rebuilt.
+
 ## Core loop
 1. **Hangar:** read the mission, repair damaged parts, buy upgrades.
 2. **Battle:** find and destroy every hive. Hives keep spawning aliens
@@ -102,6 +116,7 @@ flow field (pathfinding toward the player).
   X exit/board, Shift run on foot.
 
 ## Roadmap
+- **1.4:** 20-song generated soundtrack and a music player bar.
 - **1.3:** climb out of the mech and explore on foot with a carbine; wider
   mech that can't fit one-square gaps; bunkers and salvage caches.
 - **1.2:** terrain with heights: hills, craters, platforms with stairs,
@@ -124,4 +139,6 @@ flow field (pathfinding toward the player).
 - `scripts/hangar.gd`: hangar UI.
 - `scripts/game_state.gd`: campaign data, upgrades, save/load (autoload).
 - `scripts/sfx.gd`: generated sound effects (autoload).
+- `scripts/music/composer.gd`: song composer and synthesiser.
+- `scripts/music/music.gd`: song list, player bar and caching (autoload).
 - `scripts/mech_diagram.gd`: mech damage diagram.

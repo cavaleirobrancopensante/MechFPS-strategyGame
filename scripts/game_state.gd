@@ -1,7 +1,7 @@
 extends Node
 ## Campaign state shared between the hangar and battles (autoload "GameState").
 
-const VERSION := "1.3"
+const VERSION := "1.4"
 const SAVE_PATH := "user://mechfps_save.cfg"
 
 const PARTS := ["torso", "left_arm", "right_arm", "legs"]
