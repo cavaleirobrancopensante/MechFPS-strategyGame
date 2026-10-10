@@ -1,8 +1,11 @@
 extends Node2D
-## Battle scene. The world is a flat 2D grid (see level_map.gd); the cockpit
-## view fakes 3D by casting one ray per screen column, Wolfenstein-style.
-## Aliens, props and effects are flat sprites scaled by distance and hidden
-## behind walls with a depth buffer.
+## Battle scene. The world is a 2D grid where every cell has a height
+## (see level_map.gd): ground, hills, craters, platforms, stairs, low walls
+## and tall ruins. The cockpit view fakes 3D by marching one ray per screen
+## column through the grid, drawing the front faces and tops of cells from
+## near to far (a "2.5D" heightfield renderer, like Doom or Comanche).
+## Aliens, props and effects are flat sprites scaled by distance and clipped
+## against whatever terrain is in front of them.
 
 const LevelMap = preload("res://scripts/battle/level_map.gd")
 const AlienArt = preload("res://scripts/battle/alien_art.gd")
@@ -11,30 +14,33 @@ const MechDiagram = preload("res://scripts/mech_diagram.gd")
 # --- View ---------------------------------------------------------------------
 const COLUMNS := 200          ## rays per frame; lower = faster on old phones
 const FOV_PLANE := 0.66       ## ~66 degree field of view
-const EYE := 1.0              ## cockpit eye height (world units)
-const WALL_H := 2.4           ## wall height (world units)
+const EYE := 1.25             ## cockpit eye height above the mech's feet
 const MAX_VIEW := 22.0
 const FOG_DIST := 15.0
 const FOG := Color(0.24, 0.12, 0.13)
-const WALL_COLORS := {
+const FACE_COLORS := {
+	LevelMap.EMPTY: Color(0.38, 0.25, 0.2),      # dirt terraces and crater walls
 	LevelMap.RUIN: Color(0.58, 0.52, 0.45),
 	LevelMap.METAL: Color(0.42, 0.48, 0.56),
 	LevelMap.ORGANIC: Color(0.55, 0.2, 0.42),
+	LevelMap.PLATFORM: Color(0.5, 0.5, 0.53),
 }
+const GROUND_TOP := Color(0.27, 0.15, 0.13)
+const PLATFORM_TOP := Color(0.36, 0.36, 0.39)
 
 # --- Controls -----------------------------------------------------------------
 const PLAYER_R := 0.3
 const KEY_TURN_SPEED := 2.4
 const LOOK_SENS := 0.0065
 const PITCH_SENS := 0.9       ## screen pixels of look per pixel of finger drag
-const PITCH_LIMIT := 0.42     ## max look up/down, as a fraction of screen height
+const PITCH_LIMIT := 0.7      ## max look up/down, as a fraction of screen height
 const JOY_RADIUS := 90.0
 const FIRE_R := 78.0
 const ROCKET_R := 52.0
 
 # --- Aliens -------------------------------------------------------------------
 const ALIEN_TYPES := {
-	"crawler": {"hp": 30.0, "speed": 2.4, "dmg": 6.0, "range": 0.9, "cd": 0.8, "w": 0.9, "h": 0.7, "r": 0.25},
+	"crawler": {"hp": 30.0, "speed": 2.4, "dmg": 6.0, "range": 0.9, "cd": 0.8, "w": 1.0, "h": 0.9, "r": 0.25},
 	"spitter": {"hp": 45.0, "speed": 1.5, "dmg": 9.0, "range": 7.0, "cd": 2.2, "w": 0.85, "h": 1.15, "r": 0.25},
 	"brute": {"hp": 170.0, "speed": 1.15, "dmg": 18.0, "range": 1.25, "cd": 1.5, "w": 1.6, "h": 1.8, "r": 0.4},
 	"hive": {"hp": 300.0, "speed": 0.0, "dmg": 0.0, "range": 0.0, "cd": 5.0, "w": 2.0, "h": 1.7, "r": 0.5},
@@ -50,13 +56,16 @@ var rng := RandomNumberGenerator.new()
 
 var pos := Vector2()
 var angle := 0.0
+var floor_z := 0.0            ## height of the ground under the mech (smoothed)
+var eye_z := EYE
+var falling := false
 var parts := {}
 var aliens: Array = []
 var props: Array = []
 var projectiles: Array = []
 var explosions: Array = []
 var tracers: Array = []
-var zbuf := PackedFloat32Array()
+var col_events: Array = []    ## per column: [depth, clip_y, depth, clip_y, ...]
 var flow := PackedInt32Array()
 var flow_timer := 0.0
 var time := 0.0
@@ -112,11 +121,12 @@ func _ready() -> void:
 	map.generate(GameState.mission_seed(), GameState.mission_hive_count())
 	hives_total = map.hive_cells.size()
 	pos = map.start
-	angle = map.start_angle
-	var best_open := 0.0
+	floor_z = map.height_at(pos)
+	eye_z = floor_z + EYE
+	var best_open := -1.0
 	for i in 24:
 		var a := TAU * i / 24.0
-		var d: float = map.cast(pos, Vector2.from_angle(a))[0]
+		var d := map.open_distance(pos, Vector2.from_angle(a), 12.0)
 		if d > best_open:
 			best_open = d
 			angle = a
@@ -136,11 +146,12 @@ func _ready() -> void:
 		var c: Vector2i = nests[i]
 		_spawn(_pick_kind(), Vector2(c) + Vector2(rng.randf_range(0.3, 0.7), rng.randf_range(0.3, 0.7)), false)
 	for sp in map.prop_spots:
-		props.append({"pos": sp, "kind": "crystal" if rng.randf() < 0.3 else "rock"})
+		props.append({"pos": sp, "z": map.height_at(sp), "kind": "crystal" if rng.randf() < 0.3 else "rock"})
 
 	_build_backdrop()
-	zbuf.resize(COLUMNS)
-	zbuf.fill(MAX_VIEW)
+	col_events.resize(COLUMNS)
+	for c in COLUMNS:
+		col_events[c] = PackedFloat32Array()
 	_update_flow()
 	_show_msg("MISSION %d — DESTROY %d HIVE%s" % [GameState.mission, hives_total, "" if hives_total == 1 else "S"], 3.5)
 	Sfx.play("step")
@@ -181,7 +192,7 @@ func _spawn(kind: String, p: Vector2, awake: bool) -> Dictionary:
 	var st: Dictionary = ALIEN_TYPES[kind]
 	var hp: float = st["hp"] * (1.0 + 0.08 * (GameState.mission - 1))
 	var a := {
-		"kind": kind, "pos": p, "hp": hp, "max": hp, "awake": awake,
+		"kind": kind, "pos": p, "fz": map.height_at(p), "hp": hp, "max": hp, "awake": awake,
 		"cd": rng.randf_range(0.5, 2.0) if kind == "hive" else 0.5, "anim": rng.randf() * 10.0,
 		"flash": 0.0, "dead": false, "death_t": 0.0, "lunge": 0.0, "moving": false,
 		"seed": rng.randf() * TAU, "st": st,
@@ -242,12 +253,27 @@ func _update_player(delta: float) -> void:
 	var inp := (dir * fwd + right * strafe).limit_length(1.0)
 	var speed := GameState.walk_speed() * _legs_factor()
 	var mv := inp * speed * delta
+	var stand := map.height_at(pos)
 	var nx := pos + Vector2(mv.x, 0.0)
-	if not map.blocked(nx, PLAYER_R):
+	if not map.blocked(nx, PLAYER_R, stand):
 		pos = nx
 	var ny := pos + Vector2(0.0, mv.y)
-	if not map.blocked(ny, PLAYER_R):
+	if not map.blocked(ny, PLAYER_R, stand):
 		pos = ny
+
+	# Climb steps smoothly; drop off ledges with a heavy landing.
+	var target := map.height_at(pos)
+	if target < floor_z - 0.3:
+		falling = true
+	if target > floor_z:
+		floor_z = move_toward(floor_z, target, delta * 3.0)
+	else:
+		floor_z = move_toward(floor_z, target, delta * 7.0)
+	if falling and absf(floor_z - target) < 0.01:
+		falling = false
+		shake = maxf(shake, 12.0)
+		Sfx.play("step", -1.0)
+	eye_z = floor_z + EYE
 
 	var moving := inp.length()
 	bob_amount = lerpf(bob_amount, moving, minf(1.0, delta * 6.0))
@@ -300,19 +326,19 @@ func _fire_cannon() -> void:
 	var spread := Vector2(rng.randf_range(-6.0, 6.0), rng.randf_range(-6.0, 6.0))
 	var target = _find_target(spread)
 	var hit_point: Vector2
-	var hit_z := EYE
+	var hit_z := eye_z
 	if target != null:
 		_damage_alien(target, GameState.cannon_damage())
 		var tp: Vector2 = target["pos"]
 		hit_point = tp - (tp - pos).normalized() * 0.2
-		hit_z = _aim_height_at(spread, pos.distance_to(hit_point))
+		hit_z = _aim_height_at(spread, Vector2.from_angle(angle).dot(hit_point - pos))
 		explosions.append({"pos": hit_point, "z": hit_z, "t": 0.0, "dur": 0.22, "size": 0.3, "col": Color(0.6, 1.0, 0.3)})
 	else:
 		var impact := _aim_impact(spread)
 		hit_point = impact["pos"]
 		hit_z = impact["z"]
 		if impact["kind"] == "ground":
-			explosions.append({"pos": hit_point, "z": 0.05, "t": 0.0, "dur": 0.25, "size": 0.3, "col": Color(0.6, 0.45, 0.3)})
+			explosions.append({"pos": hit_point, "z": hit_z + 0.05, "t": 0.0, "dur": 0.25, "size": 0.3, "col": Color(0.6, 0.45, 0.3)})
 		elif impact["kind"] == "wall":
 			explosions.append({"pos": hit_point, "z": hit_z, "t": 0.0, "dur": 0.16, "size": 0.22, "col": Color(1.0, 0.8, 0.4)})
 	tracers.append({"g": g, "pos": hit_point, "z": hit_z, "t": 0.05})
@@ -326,7 +352,7 @@ func _fire_rocket() -> void:
 	# Climb/dive rate matching the crosshair line: aiming below the horizon dives.
 	var s := get_viewport_rect().size
 	var slope := -(s.y * 0.5 - horizon_y) / (s.x * 0.5 / FOV_PLANE)
-	projectiles.append({"kind": "rocket", "pos": pos + dir * 0.4, "vel": dir * 10.0, "z": EYE + slope * 0.4, "vz": slope * 10.0, "life": 3.0})
+	projectiles.append({"kind": "rocket", "pos": pos + dir * 0.4, "vel": dir * 10.0, "z": eye_z + slope * 0.4, "vz": slope * 10.0, "life": 3.0})
 	Sfx.play("rocket", -2.0)
 	shake = maxf(shake, 4.0)
 
@@ -336,27 +362,27 @@ func _aim_point(spread: Vector2) -> Vector2:
 
 
 func _find_target(spread: Vector2):
-	## Returns the nearest alien whose sprite is under the crosshair, or null.
+	## Returns the nearest alien whose visible sprite is under the crosshair.
 	var s := get_viewport_rect().size
 	var proj_scale := s.x * 0.5 / FOV_PLANE
 	var aim := _aim_point(spread)
 	var col := clampi(int(aim.x / s.x * COLUMNS), 0, COLUMNS - 1)
-	var wall_d := zbuf[col]
 	var best = null
 	var best_d := INF
 	for a in aliens:
 		if a["dead"]:
 			continue
 		var pr := _project(a["pos"])
-		if pr.y <= 0.2 or pr.y > wall_d or pr.y > MAX_VIEW:
+		if pr.y <= 0.2 or pr.y > MAX_VIEW:
 			continue
 		var st: Dictionary = a["st"]
 		var half_w: float = st["w"] * 0.5 * proj_scale / pr.y * 0.8
-		var bottom := horizon_y + EYE * proj_scale / pr.y
+		var bottom: float = horizon_y + (eye_z - a["fz"]) * proj_scale / pr.y
 		var top: float = bottom - st["h"] * proj_scale / pr.y * 0.95
 		if absf(pr.x - aim.x) < half_w and aim.y > top and aim.y < bottom and pr.y < best_d:
-			best = a
-			best_d = pr.y
+			if aim.y < _clip_at(col, pr.y):
+				best = a
+				best_d = pr.y
 	return best
 
 
@@ -369,30 +395,48 @@ func _aim_ray(spread: Vector2) -> Vector2:
 	return dir + right * FOV_PLANE * cam_x
 
 
-func _aim_height_at(spread: Vector2, depth: float) -> float:
-	## Height of the crosshair line at a given forward distance.
+func _aim_slope(spread: Vector2) -> float:
+	## Height change per unit of forward distance along the crosshair line.
 	var s := get_viewport_rect().size
-	var proj_scale := s.x * 0.5 / FOV_PLANE
-	return EYE - (_aim_point(spread).y - horizon_y) * depth / proj_scale
+	return -(_aim_point(spread).y - horizon_y) / (s.x * 0.5 / FOV_PLANE)
+
+
+func _aim_height_at(spread: Vector2, depth: float) -> float:
+	return eye_z + _aim_slope(spread) * depth
 
 
 func _aim_impact(spread: Vector2) -> Dictionary:
-	## Where a shot that misses every alien lands: ground, wall, or sky.
-	var s := get_viewport_rect().size
-	var proj_scale := s.x * 0.5 / FOV_PLANE
-	var aim := _aim_point(spread)
+	## Traces the crosshair line through the height grid: ground, wall or sky.
 	var rd := _aim_ray(spread)
-	var col := clampi(int(aim.x / s.x * COLUMNS), 0, COLUMNS - 1)
-	var wall_d := minf(zbuf[col], MAX_VIEW)
-	var below := aim.y - horizon_y
-	if below > 0.5:
-		var ground_d := EYE * proj_scale / below
-		if ground_d < wall_d:
-			return {"kind": "ground", "pos": pos + rd * ground_d, "z": 0.0}
-	var z := _aim_height_at(spread, wall_d)
-	if z >= 0.0 and z <= WALL_H and zbuf[col] < MAX_VIEW:
-		return {"kind": "wall", "pos": pos + rd * wall_d * 0.98, "z": z}
-	return {"kind": "sky", "pos": pos + rd * MAX_VIEW, "z": _aim_height_at(spread, MAX_VIEW)}
+	var slope := _aim_slope(spread)
+	var mx := int(floor(pos.x))
+	var my := int(floor(pos.y))
+	var ddx := 1e30 if rd.x == 0.0 else absf(1.0 / rd.x)
+	var ddy := 1e30 if rd.y == 0.0 else absf(1.0 / rd.y)
+	var step_x := -1 if rd.x < 0.0 else 1
+	var step_y := -1 if rd.y < 0.0 else 1
+	var sdx := (pos.x - mx) * ddx if rd.x < 0.0 else (mx + 1.0 - pos.x) * ddx
+	var sdy := (pos.y - my) * ddy if rd.y < 0.0 else (my + 1.0 - pos.y) * ddy
+	var cur_h := map.cell_h(mx, my)
+	for i in 96:
+		var d_out := minf(sdx, sdy)
+		if eye_z + slope * d_out < cur_h and slope < 0.0:
+			var d_hit := (cur_h - eye_z) / slope
+			return {"kind": "ground", "pos": pos + rd * d_hit, "z": cur_h}
+		if d_out > MAX_VIEW:
+			break
+		if sdx < sdy:
+			sdx += ddx
+			mx += step_x
+		else:
+			sdy += ddy
+			my += step_y
+		var nh := map.cell_h(mx, my)
+		var z := eye_z + slope * d_out
+		if z < nh:
+			return {"kind": "wall", "pos": pos + rd * d_out * 0.98, "z": z}
+		cur_h = nh
+	return {"kind": "sky", "pos": pos + rd * MAX_VIEW, "z": eye_z + slope * MAX_VIEW}
 
 
 func _project(world: Vector2) -> Vector2:
@@ -406,6 +450,19 @@ func _project(world: Vector2) -> Vector2:
 		return Vector2(-99999.0, ty)
 	var tx := right.dot(rel) / FOV_PLANE
 	return Vector2(s.x * 0.5 * (1.0 + tx / ty), ty)
+
+
+func _clip_at(col: int, depth: float) -> float:
+	## Screen y above which a thing at `depth` in this column is still visible.
+	var ev: PackedFloat32Array = col_events[col]
+	var clip := 1e9
+	var i := 0
+	while i < ev.size():
+		if ev[i] >= depth:
+			break
+		clip = ev[i + 1]
+		i += 2
+	return clip
 
 
 func _damage_alien(a: Dictionary, amount: float) -> void:
@@ -423,7 +480,7 @@ func _damage_alien(a: Dictionary, amount: float) -> void:
 		hives_destroyed += 1
 		for i in 5:
 			var off := Vector2(rng.randf_range(-0.6, 0.6), rng.randf_range(-0.6, 0.6))
-			explosions.append({"pos": a["pos"] + off, "z": rng.randf_range(0.3, 1.4), "t": -i * 0.08, "dur": 0.9, "size": 1.6, "col": Color(1.0, 0.45, 0.2)})
+			explosions.append({"pos": a["pos"] + off, "z": a["fz"] + rng.randf_range(0.3, 1.4), "t": -i * 0.08, "dur": 0.9, "size": 1.6, "col": Color(1.0, 0.45, 0.2)})
 		Sfx.play("boom", 0.0)
 		Sfx.play("screech", -2.0, 0.3)
 		shake = maxf(shake, 14.0)
@@ -433,7 +490,7 @@ func _damage_alien(a: Dictionary, amount: float) -> void:
 		kills += 1
 		if a["kind"] == "brute":
 			brutes += 1
-		explosions.append({"pos": a["pos"], "z": st["h"] * 0.5, "t": 0.0, "dur": 0.45, "size": st["w"] * 0.9, "col": Color(0.5, 0.95, 0.2)})
+		explosions.append({"pos": a["pos"], "z": a["fz"] + st["h"] * 0.5, "t": 0.0, "dur": 0.45, "size": st["w"] * 0.9, "col": Color(0.5, 0.95, 0.2)})
 		Sfx.play("splat", -3.0)
 
 
@@ -469,11 +526,13 @@ func _damage_player(amount: float, src: Vector2) -> void:
 
 
 func _update_flow() -> void:
-	flow = map.distance_field(Vector2i(int(floor(pos.x)), int(floor(pos.y))))
+	flow = map.distance_field(Vector2i(int(floor(pos.x)), int(floor(pos.y))), false)
 
 
 func _flow_dir(p: Vector2) -> Vector2:
 	var c := Vector2i(int(floor(p.x)), int(floor(p.y)))
+	var here := map.cell_h(c.x, c.y)
+	var limit := here + LevelMap.STEP
 	var best := c
 	var bd := flow[map.idx(c.x, c.y)] if map.in_bounds(c.x, c.y) else -1
 	if bd < 0:
@@ -483,10 +542,10 @@ func _flow_dir(p: Vector2) -> Vector2:
 			if dx == 0 and dy == 0:
 				continue
 			var n := c + Vector2i(dx, dy)
-			if not map.in_bounds(n.x, n.y) or map.cell(n.x, n.y) != LevelMap.EMPTY:
+			if not map.in_bounds(n.x, n.y) or map.cell_h(n.x, n.y) > limit:
 				continue
 			if dx != 0 and dy != 0:
-				if map.cell(c.x + dx, c.y) != LevelMap.EMPTY or map.cell(c.x, c.y + dy) != LevelMap.EMPTY:
+				if map.cell_h(c.x + dx, c.y) > limit or map.cell_h(c.x, c.y + dy) > limit:
 					continue
 			var d := flow[map.idx(n.x, n.y)]
 			if d >= 0 and d < bd:
@@ -507,23 +566,26 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 		a["death_t"] += delta
 		return
 	a["cd"] -= delta
+	a["fz"] = move_toward(a["fz"], map.height_at(a["pos"]), delta * 5.0)
 	var to_p: Vector2 = pos - a["pos"]
 	var dist := to_p.length()
 	var st: Dictionary = a["st"]
 	var dmg_mul := 1.0 + 0.06 * (GameState.mission - 1)
+	var a_eye: float = a["fz"] + st["h"] * 0.8
 
 	if a["kind"] == "hive":
 		_update_hive(a, dist)
 		return
 	if not a["awake"]:
-		if dist < 9.0 and map.line_of_sight(a["pos"], pos):
+		if dist < 9.0 and map.line_of_sight(a["pos"], a_eye, pos, eye_z):
 			a["awake"] = true
 			Sfx.play("screech", lerpf(-4.0, -16.0, dist / 9.0), 0.25)
 		else:
 			a["moving"] = false
 			return
 
-	var los := dist < 12.0 and map.line_of_sight(a["pos"], pos)
+	var los := dist < 12.0 and map.line_of_sight(a["pos"], a_eye, pos, eye_z)
+	var same_level: bool = absf(a["fz"] - floor_z) < 1.0
 	var move_dir := Vector2.ZERO
 	var speed_mul := 1.0
 	if a["kind"] == "spitter" and los and dist < st["range"]:
@@ -535,16 +597,18 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 			speed_mul = 0.5
 		if a["cd"] <= 0.0:
 			var d := to_p / dist
-			projectiles.append({"kind": "acid", "pos": a["pos"] + d * 0.3, "vel": d * 5.5, "z": 0.8, "life": 4.0, "dmg": st["dmg"] * dmg_mul, "src": a["pos"]})
+			var z0: float = a["fz"] + st["h"] * 0.7
+			var vz := (eye_z - 0.4 - z0) / dist * 5.5
+			projectiles.append({"kind": "acid", "pos": a["pos"] + d * 0.3, "vel": d * 5.5, "z": z0, "vz": vz, "life": 4.0, "dmg": st["dmg"] * dmg_mul, "src": a["pos"]})
 			a["cd"] = st["cd"] * rng.randf_range(0.8, 1.3)
 			a["lunge"] = 0.2
 			Sfx.play("splat", -12.0, 0.3)
-	elif los and dist < st["range"] + PLAYER_R + 0.1:
+	elif los and same_level and dist < st["range"] + PLAYER_R + 0.1:
 		if a["cd"] <= 0.0:
 			_damage_player(st["dmg"] * dmg_mul, a["pos"])
 			a["cd"] = st["cd"]
 			a["lunge"] = 0.25
-	elif los and dist < 6.0:
+	elif los and same_level and dist < 6.0:
 		move_dir = to_p / dist
 	else:
 		move_dir = _flow_dir(a["pos"])
@@ -560,11 +624,12 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 	var step: Vector2 = move_dir.limit_length(1.0) * st["speed"] * speed_mul * delta
 	a["moving"] = step.length() > 0.0005
 	var r: float = st["r"]
+	var stand := map.height_at(a["pos"])
 	var nx: Vector2 = a["pos"] + Vector2(step.x, 0.0)
-	if not map.blocked(nx, r) and nx.distance_to(pos) > r + PLAYER_R:
+	if not map.blocked(nx, r, stand) and nx.distance_to(pos) > r + PLAYER_R:
 		a["pos"] = nx
 	var ny: Vector2 = a["pos"] + Vector2(0.0, step.y)
-	if not map.blocked(ny, r) and ny.distance_to(pos) > r + PLAYER_R:
+	if not map.blocked(ny, r, stand) and ny.distance_to(pos) > r + PLAYER_R:
 		a["pos"] = ny
 
 
@@ -580,11 +645,12 @@ func _update_hive(a: Dictionary, dist: float) -> void:
 			alive += 1
 	if alive >= 8 + GameState.mission * 2:
 		return
+	var stand := map.height_at(a["pos"])
 	for attempt in 8:
 		var p: Vector2 = a["pos"] + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(0.7, 1.4)
-		if not map.blocked(p, 0.3):
+		if not map.blocked(p, 0.3, stand):
 			_spawn(_pick_kind(), p, true)
-			explosions.append({"pos": p, "z": 0.3, "t": 0.0, "dur": 0.5, "size": 0.7, "col": Color(0.75, 0.3, 0.8)})
+			explosions.append({"pos": p, "z": map.height_at(p) + 0.3, "t": 0.0, "dur": 0.5, "size": 0.7, "col": Color(0.75, 0.3, 0.8)})
 			Sfx.play("splat", lerpf(-6.0, -18.0, clampf(dist / 12.0, 0.0, 1.0)), 0.3)
 			return
 
@@ -597,26 +663,30 @@ func _update_projectiles(delta: float) -> void:
 	for pr in projectiles:
 		pr["life"] -= delta
 		var np: Vector2 = pr["pos"] + pr["vel"] * delta
+		pr["z"] += pr["vz"] * delta
+		var z: float = pr["z"]
+		var ground := map.height_at(np)
 		if pr["kind"] == "rocket":
 			if puff:
-				explosions.append({"pos": pr["pos"], "z": pr["z"], "t": 0.0, "dur": 0.5, "size": 0.18, "col": Color(0.55, 0.52, 0.5), "smoke": true})
-			pr["z"] += pr["vz"] * delta
-			var rz: float = pr["z"]
-			var hit: bool = (map.is_wall_at(np) and rz < WALL_H) or rz <= 0.05 or pr["life"] <= 0.0
+				explosions.append({"pos": pr["pos"], "z": z, "t": 0.0, "dur": 0.5, "size": 0.18, "col": Color(0.55, 0.52, 0.5), "smoke": true})
+			var hit: bool = ground > z or pr["life"] <= 0.0
 			for a in aliens:
-				if not a["dead"] and a["pos"].distance_to(np) < a["st"]["r"] + 0.3 and rz < a["st"]["h"] + 0.2:
+				if a["dead"]:
+					continue
+				var st: Dictionary = a["st"]
+				if a["pos"].distance_to(np) < st["r"] + 0.3 and z > a["fz"] - 0.1 and z < a["fz"] + st["h"] + 0.2:
 					hit = true
 					break
 			if hit:
-				_explode_rocket(pr["pos"], maxf(rz, 0.1))
+				_explode_rocket(pr["pos"], maxf(z, map.height_at(pr["pos"]) + 0.1))
 				pr["life"] = -1.0
 				continue
 		else:
-			if map.is_wall_at(np) or pr["life"] <= 0.0:
-				explosions.append({"pos": pr["pos"], "z": pr["z"], "t": 0.0, "dur": 0.3, "size": 0.35, "col": Color(0.6, 1.0, 0.2)})
+			if ground > z or pr["life"] <= 0.0:
+				explosions.append({"pos": pr["pos"], "z": maxf(z, ground), "t": 0.0, "dur": 0.3, "size": 0.35, "col": Color(0.6, 1.0, 0.2)})
 				pr["life"] = -1.0
 				continue
-			if np.distance_to(pos) < PLAYER_R + 0.15:
+			if np.distance_to(pos) < PLAYER_R + 0.15 and z > floor_z - 0.2 and z < eye_z + 0.5:
 				_damage_player(pr["dmg"], pr["src"])
 				pr["life"] = -1.0
 				continue
@@ -628,16 +698,19 @@ func _explode_rocket(p: Vector2, z: float) -> void:
 	explosions.append({"pos": p, "z": z, "t": 0.0, "dur": 0.75, "size": 1.4, "col": Color(1.0, 0.6, 0.2)})
 	for i in 3:
 		var off := Vector2(rng.randf_range(-0.5, 0.5), rng.randf_range(-0.5, 0.5))
-		explosions.append({"pos": p + off, "z": rng.randf_range(0.3, 1.2), "t": -0.06 * (i + 1), "dur": 0.6, "size": 0.9, "col": Color(1.0, 0.75, 0.3)})
+		explosions.append({"pos": p + off, "z": z + rng.randf_range(-0.3, 0.5), "t": -0.06 * (i + 1), "dur": 0.6, "size": 0.9, "col": Color(1.0, 0.75, 0.3)})
 	Sfx.play("boom", -1.0)
 	var d := p.distance_to(pos)
 	shake = maxf(shake, 16.0 * clampf(1.0 - d / 9.0, 0.25, 1.0))
 	for a in aliens:
 		if a["dead"]:
 			continue
+		var st: Dictionary = a["st"]
 		var dd: float = a["pos"].distance_to(p)
-		if dd < 1.9 and z < a["st"]["h"] + 1.2:
-			_damage_alien(a, GameState.rocket_damage() * (1.0 - dd / 1.9 * 0.6))
+		var dz: float = z - (a["fz"] + st["h"] * 0.5)
+		var d3 := sqrt(dd * dd + dz * dz)
+		if d3 < 1.9:
+			_damage_alien(a, GameState.rocket_damage() * (1.0 - d3 / 1.9 * 0.6))
 
 
 func _update_effects(delta: float) -> void:
@@ -663,7 +736,7 @@ func _update_effects(delta: float) -> void:
 func _check_end() -> void:
 	if parts["torso"] <= 0.0:
 		state = State.LOST
-		explosions.append({"pos": pos + Vector2.from_angle(angle) * 0.6, "z": 0.6, "t": 0.0, "dur": 1.0, "size": 1.5, "col": Color(1.0, 0.5, 0.2)})
+		explosions.append({"pos": pos + Vector2.from_angle(angle) * 0.6, "z": eye_z - 0.6, "t": 0.0, "dur": 1.0, "size": 1.5, "col": Color(1.0, 0.5, 0.2)})
 		Sfx.play("boom", 2.0)
 		shake = 22.0
 		_finish()
@@ -787,7 +860,7 @@ func _draw() -> void:
 	var horizon := horizon_y
 	_draw_sky(w, h, horizon)
 	_draw_ground(w, h, horizon)
-	_draw_walls(w, h, horizon, proj_scale)
+	_draw_world(w, h, horizon, proj_scale)
 	_draw_sprites(w, h, horizon, proj_scale)
 	_draw_tracers(w, h, horizon, proj_scale)
 	_draw_guns(w, h)
@@ -854,65 +927,180 @@ func _draw_ground(w: float, h: float, horizon: float) -> void:
 		PackedColorArray([Color(0.26, 0.14, 0.12), Color(0.26, 0.14, 0.12), Color(0.13, 0.09, 0.08), Color(0.13, 0.09, 0.08)]))
 
 
-func _draw_walls(w: float, h: float, horizon: float, proj_scale: float) -> void:
+
+func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
+	## Heightfield renderer. For every screen column a ray walks the grid from
+	## the mech outward. Each cell contributes its front face (if it is taller
+	## than the cell before it) and its top surface. Everything is drawn near
+	## to far, only above `clip` (the highest pixel already covered), so nearer
+	## terrain hides what's behind it. Height-0 ground is the backdrop polygon,
+	## so flat ground costs nothing to draw.
 	var dir := Vector2.from_angle(angle)
 	var plane := Vector2(-dir.y, dir.x) * FOV_PLANE
 	var col_w := w / COLUMNS
+	# Local copies: direct array access is much faster than method calls.
+	var hmax := map.max_height
+	var heights := map.heights
+	var kinds := map.kinds
+	var mw := map.w
+	var mh := map.h
+	var ez := eye_z
+	var ps := proj_scale
+	var px := pos.x
+	var py := pos.y
+	var cut := (hmax - ez) * ps
 	for c in COLUMNS:
 		var cam_x := 2.0 * (c + 0.5) / COLUMNS - 1.0
-		var hit := map.cast(pos, dir + plane * cam_x)
-		var d := maxf(hit[0], 0.05)
-		zbuf[c] = d
-		if d > MAX_VIEW:
-			continue
-		var side: int = hit[1]
-		var wall_x: float = hit[2]
-		var kind: int = hit[3]
-		var bottom := horizon + EYE * proj_scale / d
-		var top := horizon - (WALL_H - EYE) * proj_scale / d
-		var lh := bottom - top
-		var fog := clampf(d / FOG_DIST, 0.0, 1.0)
-		var base: Color = WALL_COLORS.get(kind, WALL_COLORS[LevelMap.METAL])
-		if side == 1:
-			base = base.darkened(0.22)
+		var rdx := dir.x + plane.x * cam_x
+		var rdy := dir.y + plane.y * cam_x
 		var x := c * col_w
 		var cw := col_w + 1.0
+		var ev := PackedFloat32Array()
 
-		if kind == LevelMap.RUIN:
-			# Jagged broken roofline.
-			var seg := floorf(wall_x * 5.0)
-			var jag := fposmod(sin(seg * 12.9898 + side * 3.1) * 43758.5453, 1.0)
-			top += lh * 0.22 * jag
-		elif kind == LevelMap.ORGANIC:
-			base = base.lightened(0.12 * sin(time * 3.0 + wall_x * 10.0))
+		var mx := int(floor(px))
+		var my := int(floor(py))
+		var ddx := 1e30 if rdx == 0.0 else absf(1.0 / rdx)
+		var ddy := 1e30 if rdy == 0.0 else absf(1.0 / rdy)
+		var step_x := -1 if rdx < 0.0 else 1
+		var step_y := -1 if rdy < 0.0 else 1
+		var sdx := (px - mx) * ddx if rdx < 0.0 else (mx + 1.0 - px) * ddx
+		var sdy := (py - my) * ddy if rdy < 0.0 else (my + 1.0 - py) * ddy
 
-		var col := base.lerp(FOG, fog)
-		var y0 := maxf(top, -20.0)
-		var y1 := minf(bottom, h + 20.0)
-		draw_rect(Rect2(x, y0, cw, y1 - y0), col)
+		var clip := h + 4.0
+		var ci := my * mw + mx
+		var cur_h: float = heights[ci]
+		var cur_k: int = kinds[ci]
+		var d_in := 0.0
+		for i in 64:
+			var side := 0
+			var d_out := sdx
+			if sdy < sdx:
+				side = 1
+				d_out = sdy
 
-		# Cheap surface detail so walls read as buildings, bulkheads or flesh.
-		var detail := Color(0, 0, 0, 0.35 * (1.0 - fog))
-		match kind:
-			LevelMap.RUIN:
+			# Top surface of the current cell (only visible when below the eye).
+			if cur_h < ez:
+				var y_far := horizon + (ez - cur_h) * ps / maxf(d_out, 0.05)
+				if cur_h != 0.0 or cur_k != LevelMap.EMPTY:
+					var y_near := clip
+					if d_in > 0.05:
+						y_near = minf(horizon + (ez - cur_h) * ps / d_in, clip)
+					if y_near > y_far:
+						draw_rect(Rect2(x, y_far, cw, y_near - y_far), _top_color(cur_h, cur_k, d_out))
+				if y_far < clip:
+					clip = y_far
+					ev.append(d_out)
+					ev.append(clip)
+
+			# Stop when out of range, or when nothing farther can rise above
+			# what's already covered.
+			if d_out > MAX_VIEW or clip <= 0.0 or clip <= horizon - cut / d_out:
+				break
+
+			if side == 0:
+				sdx += ddx
+				mx += step_x
+			else:
+				sdy += ddy
+				my += step_y
+			if mx < 0 or my < 0 or mx >= mw or my >= mh:
+				break
+			d_in = d_out
+			ci = my * mw + mx
+			var nh: float = heights[ci]
+			if nh > cur_h:
+				var y_top := horizon - (nh - ez) * ps / d_in
+				var y_vis := minf(horizon - (cur_h - ez) * ps / d_in, clip)
+				if y_vis > y_top:
+					var wall_x := (py + d_in * rdy) if side == 0 else (px + d_in * rdx)
+					wall_x -= floorf(wall_x)
+					_draw_face(x, cw, y_top, y_vis, nh, cur_h, kinds[ci], side, wall_x, d_in, horizon, ps)
+				if y_top < clip:
+					clip = y_top
+					ev.append(d_in)
+					ev.append(clip)
+			cur_h = nh
+			cur_k = kinds[ci]
+		col_events[c] = ev
+
+
+func _top_color(height: float, kind: int, d: float) -> Color:
+	var col: Color
+	match kind:
+		LevelMap.PLATFORM:
+			col = PLATFORM_TOP
+		LevelMap.EMPTY:
+			col = GROUND_TOP.lightened(clampf(height * 0.12, 0.0, 0.3)) if height >= 0.0 else GROUND_TOP.darkened(0.35 * minf(-height, 1.0))
+		_:
+			col = FACE_COLORS.get(kind, FACE_COLORS[LevelMap.METAL]).darkened(0.35)
+	return col.lerp(FOG, clampf(d / FOG_DIST, 0.0, 1.0))
+
+
+func _vband(x: float, cw: float, y0: float, y1: float, lo: float, hi: float, c: Color) -> void:
+	## Draws a vertical slice of a face, kept within [lo, hi].
+	var a := maxf(y0, lo)
+	var b := minf(y1, hi)
+	if b > a:
+		draw_rect(Rect2(x, a, cw, b - a), c)
+
+
+func _draw_face(x: float, cw: float, y_top: float, y_vis: float, top_h: float, base_h: float, kind: int, side: int, wall_x: float, d: float, horizon: float, proj_scale: float) -> void:
+	var fog := clampf(d / FOG_DIST, 0.0, 1.0)
+	var base: Color = FACE_COLORS.get(kind, FACE_COLORS[LevelMap.METAL])
+	if side == 1:
+		base = base.darkened(0.22)
+	var face_h := top_h - base_h
+	var yt := y_top
+	if kind == LevelMap.RUIN and face_h > 1.5:
+		# Jagged broken roofline.
+		var seg := floorf(wall_x * 5.0)
+		var jag := fposmod(sin(seg * 12.9898 + side * 3.1 + top_h * 7.0) * 43758.5453, 1.0)
+		yt += 0.25 * jag * proj_scale / d
+	elif kind == LevelMap.ORGANIC:
+		base = base.lightened(0.12 * sin(time * 3.0 + wall_x * 10.0))
+	var col := base.lerp(FOG, fog)
+	var lo := maxf(yt, -50.0)
+	var hi := minf(y_vis, 5000.0)
+	if hi <= lo:
+		return
+	draw_rect(Rect2(x, lo, cw, hi - lo), col)
+
+	var k := proj_scale / d
+	var shade := Color(0, 0, 0, 0.35 * (1.0 - fog))
+	match kind:
+		LevelMap.RUIN:
+			if face_h > 1.5:
 				var u := fposmod(wall_x * 2.0, 1.0)
 				if u > 0.25 and u < 0.62:
-					for row in 2:
-						var wy := top + lh * (0.12 + row * 0.3)
-						draw_rect(Rect2(x, maxf(wy, -20.0), cw, lh * 0.14), Color(0.06, 0.04, 0.05, 0.75 * (1.0 - fog)))
+					var z := base_h + 0.7
+					while z + 0.5 < top_h - 0.3:
+						var wy0 := horizon - (z + 0.5 - eye_z) * k
+						var wy1 := horizon - (z - eye_z) * k
+						_vband(x, cw, wy0, wy1, lo, hi, Color(0.06, 0.04, 0.05, 0.75 * (1.0 - fog)))
+						z += 1.3
 				if fposmod(wall_x * 4.0, 1.0) < 0.06:
-					draw_rect(Rect2(x, y0, cw, y1 - y0), detail)
-			LevelMap.METAL:
-				if fposmod(wall_x * 4.0, 1.0) < 0.07:
-					draw_rect(Rect2(x, y0, cw, y1 - y0), detail)
-				var stripe := Color(0.75, 0.6, 0.1) if fposmod(wall_x * 6.0, 1.0) < 0.5 else Color(0.1, 0.1, 0.1)
-				draw_rect(Rect2(x, bottom - lh * 0.12, cw, lh * 0.07), stripe.lerp(FOG, fog))
-			LevelMap.ORGANIC:
-				var u2 := fposmod(wall_x * 3.0, 1.0)
-				if u2 > 0.42 and u2 < 0.55:
-					var glow := Color(1.0, 0.55, 0.15).lerp(FOG, fog * 0.7)
-					glow.a = 0.6 + 0.4 * sin(time * 4.0 + wall_x * 20.0)
-					draw_rect(Rect2(x, top + lh * 0.45, cw, lh * 0.08), glow)
+					draw_rect(Rect2(x, lo, cw, hi - lo), shade)
+			else:
+				# Low cover wall: lighter capstone along the top.
+				_vband(x, cw, y_top, y_top + 0.12 * k, lo, hi, base.lightened(0.25).lerp(FOG, fog))
+		LevelMap.METAL:
+			if fposmod(wall_x * 4.0, 1.0) < 0.07:
+				draw_rect(Rect2(x, lo, cw, hi - lo), shade)
+			var stripe := Color(0.75, 0.6, 0.1) if fposmod(wall_x * 6.0, 1.0) < 0.5 else Color(0.1, 0.1, 0.1)
+			var sy0 := horizon - (base_h + 0.35 - eye_z) * k
+			var sy1 := horizon - (base_h + 0.15 - eye_z) * k
+			_vband(x, cw, sy0, sy1, lo, hi, stripe.lerp(FOG, fog))
+		LevelMap.ORGANIC:
+			var u2 := fposmod(wall_x * 3.0, 1.0)
+			if u2 > 0.42 and u2 < 0.55:
+				var glow := Color(1.0, 0.55, 0.15).lerp(FOG, fog * 0.7)
+				glow.a = 0.6 + 0.4 * sin(time * 4.0 + wall_x * 20.0)
+				var gz := base_h + face_h * 0.45
+				_vband(x, cw, horizon - (gz + 0.2 - eye_z) * k, horizon - (gz - eye_z) * k, lo, hi, glow)
+		_:
+			# Steps, platform sides, terraces and crater walls: bright lip on top
+			# so every ledge reads clearly.
+			_vband(x, cw, y_top, y_top + maxf(2.0, 0.06 * k), lo, hi, base.lightened(0.35).lerp(FOG, fog))
 
 
 func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> void:
@@ -943,6 +1131,7 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 		var sx: float = it[3]
 		var o: Dictionary = it[2]
 		var fog := clampf(ty / FOG_DIST, 0.0, 1.0)
+		var c := clampi(int(sx / col_w), 0, COLUMNS - 1)
 		match it[1]:
 			0:
 				var st: Dictionary = o["st"]
@@ -952,7 +1141,6 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var mod := Color.WHITE.lerp(FOG, fog * 0.85)
 				var ww: float = st["w"] * (1.0 + o["lunge"] * 0.6)
 				var hh: float = st["h"] * (1.0 + o["lunge"] * 0.3)
-				var zb := 0.0
 				if o["dead"]:
 					var k: float = clampf(o["death_t"] / 0.6, 0.0, 1.0)
 					hh *= 1.0 - k
@@ -961,11 +1149,10 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					mod.a = 1.0 - k
 				if o["flash"] > 0.0:
 					mod = Color(2.0, 2.0, 2.0)
-				var rect := _billboard(frame, sx, ty, ww, hh, zb, mod, horizon, proj_scale, col_w)
+				var rect := _billboard(frame, sx, ty, ww, hh, o["fz"], mod, horizon, proj_scale, col_w)
 				if not o["dead"] and (o["kind"] == "hive" or o["kind"] == "brute") and o["hp"] < o["max"] and rect.size.x > 6.0:
 					var bar := Rect2(rect.position.x, rect.position.y - 10.0, rect.size.x, 5.0)
-					var visible_col := clampi(int(sx / col_w), 0, COLUMNS - 1)
-					if ty < zbuf[visible_col]:
+					if bar.position.y < _clip_at(c, ty):
 						draw_rect(bar, Color(0, 0, 0, 0.6))
 						draw_rect(Rect2(bar.position, Vector2(bar.size.x * o["hp"] / o["max"], bar.size.y)), Color(0.9, 0.2, 0.6))
 				if o == locked_target and state == State.PLAYING:
@@ -975,13 +1162,12 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var mod2 := Color.WHITE.lerp(FOG, fog * 0.85)
 				if o["kind"] == "crystal":
 					mod2 = mod2.lerp(Color(1.4, 1.4, 1.4), 0.3 + 0.2 * sin(time * 2.0))
-				_billboard(t, sx, ty, 0.6, 0.6, 0.0, mod2, horizon, proj_scale, col_w)
+				_billboard(t, sx, ty, 0.6, 0.6, o["z"], mod2, horizon, proj_scale, col_w)
 			2:
-				var c := clampi(int(sx / col_w), 0, COLUMNS - 1)
-				if ty >= zbuf[c]:
-					continue
-				var cy: float = horizon + (EYE - o["z"]) * proj_scale / ty
 				if ty < 0.5:
+					continue
+				var cy: float = horizon + (eye_z - o["z"]) * proj_scale / ty
+				if cy >= _clip_at(c, ty):
 					continue
 				if o["kind"] == "rocket":
 					var r := clampf(0.09 * proj_scale / ty, 2.0, 40.0)
@@ -992,11 +1178,10 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					draw_circle(Vector2(sx, cy), r2 * 1.8, Color(0.5, 1.0, 0.1, 0.3))
 					draw_circle(Vector2(sx, cy), r2, Color(0.75, 1.0, 0.3))
 			3:
-				var c2 := clampi(int(sx / col_w), 0, COLUMNS - 1)
-				if ty >= zbuf[c2] + 0.3:
+				var cy2: float = horizon + (eye_z - o["z"]) * proj_scale / ty
+				if cy2 >= _clip_at(c, ty + 0.3):
 					continue
 				var k2: float = o["t"] / o["dur"]
-				var cy2: float = horizon + (EYE - o["z"]) * proj_scale / ty
 				if ty < 0.6 and o["size"] < 0.5:
 					continue
 				var base_r: float = minf(o["size"] * proj_scale / ty, h * 0.28)
@@ -1012,9 +1197,11 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 
 
 func _billboard(t: Texture2D, sx: float, ty: float, ww: float, hh: float, z: float, mod: Color, horizon: float, proj_scale: float, col_w: float) -> Rect2:
+	## Draws a sprite standing on height z, one screen column at a time, cut
+	## off wherever nearer terrain covers it.
 	var sw := ww * proj_scale / ty
 	var sh := hh * proj_scale / ty
-	var bottom := horizon + (EYE - z) * proj_scale / ty
+	var bottom := horizon + (eye_z - z) * proj_scale / ty
 	var top := bottom - sh
 	var left := sx - sw * 0.5
 	if sw < 1.0 or sh < 1.0:
@@ -1024,15 +1211,18 @@ func _billboard(t: Texture2D, sx: float, ty: float, ww: float, hh: float, z: flo
 	var c0 := maxi(int(floor(left / col_w)), 0)
 	var c1 := mini(int(ceil((left + sw) / col_w)), COLUMNS)
 	for c in range(c0, c1):
-		if ty >= zbuf[c]:
+		var clip := _clip_at(c, ty)
+		if top >= clip:
 			continue
+		var vis_bottom := minf(bottom, clip)
 		var xa := maxf(c * col_w, left)
 		var xb := minf((c + 1) * col_w, left + sw)
 		if xb <= xa:
 			continue
 		var u0 := (xa - left) / sw
 		var u1 := (xb - left) / sw
-		draw_texture_rect_region(t, Rect2(xa, top, xb - xa + 0.5, sh), Rect2(u0 * tw, 0, (u1 - u0) * tw, th), mod)
+		var v1 := (vis_bottom - top) / sh
+		draw_texture_rect_region(t, Rect2(xa, top, xb - xa + 0.5, vis_bottom - top), Rect2(u0 * tw, 0, (u1 - u0) * tw, v1 * th), mod)
 	return Rect2(left, top, sw, sh)
 
 
@@ -1057,7 +1247,7 @@ func _draw_tracers(w: float, h: float, horizon: float, proj_scale: float) -> voi
 		var pr := _project(t["pos"])
 		if pr.y <= 0.1:
 			continue
-		var end := Vector2(pr.x, horizon + (EYE - t["z"]) * proj_scale / pr.y)
+		var end := Vector2(pr.x, horizon + (eye_z - t["z"]) * proj_scale / pr.y)
 		var start := _muzzle_pos(t["g"], w, h)
 		draw_line(start, end, Color(1.0, 0.85, 0.4, 0.8), 3.0)
 		draw_line(start, start.lerp(end, 0.4), Color(1, 1, 0.9, 0.9), 1.5)
@@ -1207,16 +1397,27 @@ func _draw_minimap(w: float) -> void:
 		for gx in range(pc.x - radius - 1, pc.x + radius + 2):
 			if not map.in_bounds(gx, gy):
 				continue
-			var k := map.cell(gx, gy)
-			if k == LevelMap.EMPTY:
+			var k := map.kind_of(gx, gy)
+			var hh := map.cell_h(gx, gy)
+			var c := Color(0, 0, 0, 0)
+			match k:
+				LevelMap.RUIN:
+					c = Color(0.35, 0.45, 0.38) if hh - map.terrain[map.idx(gx, gy)] > 1.5 else Color(0.55, 0.6, 0.45)
+				LevelMap.METAL:
+					c = Color(0.3, 0.38, 0.48)
+				LevelMap.ORGANIC:
+					c = Color(0.55, 0.16, 0.42)
+				LevelMap.PLATFORM:
+					c = Color(0.45, 0.5, 0.6, 0.55 + clampf(hh * 0.15, 0.0, 0.4))
+				_:
+					if hh > 0.01:
+						c = Color(0.3, 0.5, 0.3, clampf(hh * 0.4, 0.1, 0.35))
+					elif hh < -0.01:
+						c = Color(0, 0, 0, 0.55)
+			if c.a <= 0.0:
 				continue
 			var r := Rect2(center + (Vector2(gx, gy) - pos) * cs, Vector2(cs, cs)).intersection(mm)
 			if r.has_area():
-				var c := Color(0.35, 0.45, 0.38)
-				if k == LevelMap.METAL:
-					c = Color(0.3, 0.38, 0.48)
-				elif k == LevelMap.ORGANIC:
-					c = Color(0.55, 0.16, 0.42)
 				draw_rect(r, c)
 	for a in aliens:
 		if a["dead"]:
@@ -1246,6 +1447,8 @@ func _draw_minimap(w: float) -> void:
 	draw_line(center, center + fwd.rotated(fov) * 40.0, Color(0.4, 1.0, 0.6, 0.35), 1.0)
 	draw_colored_polygon(PackedVector2Array([center + fwd * 10.0, center + fwd.rotated(2.4) * 7.0, center + fwd.rotated(-2.4) * 7.0]), Color(0.4, 1.0, 0.6))
 	draw_rect(mm, Color(0.2, 0.5, 0.3), false, 2.0)
+	# Altitude readout under the minimap.
+	_text("ELEV %+.1f" % floor_z, Vector2(mm.get_center().x, mm.end.y + 20.0), 15, Color(0.4, 1.0, 0.6, 0.8))
 
 
 func _draw_touch_controls(w: float, h: float) -> void:
