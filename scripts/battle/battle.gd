@@ -20,7 +20,9 @@ const POST_SHADER = preload("res://scripts/battle/post.gdshader")
 
 # --- View ---------------------------------------------------------------------
 var COLUMNS := 200            ## rays per frame (from Settings: graphics quality)
-const FOV_PLANE := 0.66       ## ~66 degree field of view
+var FOV_PLANE := 0.66         ## ~66 degree field of view (narrows when aiming down the sight)
+const BASE_FOV := 0.66
+const ADS_ZOOM := 1.8
 const EYE := 1.25             ## cockpit eye height above the mech's feet
 const MAX_VIEW := 22.0
 const FOG_DIST := 15.0
@@ -51,6 +53,9 @@ var pause_layer: CanvasLayer
 ## shader), effects (sprites, particles, guns, cockpit), and the HUD on top
 ## of the post-processing pass. `cv` is the canvas currently being drawn on.
 var cv: CanvasItem = self
+var loading := true           ## true until the 3D-baked sprites are ready
+var ads_on := false           ## aiming down the sight (on foot)
+var ads_t := 0.0              ## 0 = hip, 1 = fully aimed
 var sky_node: Node2D
 var fx_node: Node2D
 var ui_node: Node2D
@@ -246,6 +251,9 @@ var cracks: Array = []
 
 func _ready() -> void:
 	font = ThemeDB.fallback_font
+	if not Baker.done:
+		queue_redraw()
+		await Baker.bake()
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	op = GameState.current_mission
 	if op.is_empty():
@@ -262,6 +270,8 @@ func _ready() -> void:
 	_apply_theme(Themes.pick(int(op.get("theme_seed", op.get("seed", 7)))))
 	tex = AlienArt.build_all()
 	tex3d = ModelArt.build_all()
+	for k in Baker.sprites:
+		tex3d[k] = Baker.sprites[k]
 	pilot_max_hp = GameState.pilot_max_hp()
 	pilot_hp = pilot_max_hp
 	for a in GameState.AMMO:
@@ -322,6 +332,7 @@ func _ready() -> void:
 	Sfx.play("rocket", -4.0, 0.0, 0.6)
 	_build_pause_menu()
 	_build_layers()
+	loading = false
 
 
 func _build_layers() -> void:
@@ -537,7 +548,10 @@ func _spawn(kind: String, p: Vector2, awake: bool) -> Dictionary:
 # =============================================================================
 
 func _process(delta: float) -> void:
+	if loading:
+		return
 	delta = minf(delta, 0.05)
+	_update_ads(delta)
 	time += delta
 	var vh := get_viewport_rect().size.y
 	pitch = clampf(pitch, -vh * PITCH_LIMIT, vh * PITCH_LIMIT)
@@ -615,8 +629,8 @@ func _update_player(delta: float) -> void:
 	var speed := GameState.walk_speed() * _legs_factor()
 	var step_h := LevelMap.STEP
 	if on_foot:
-		running = move_vec.length() > 0.85 or Input.is_physical_key_pressed(KEY_SHIFT)
-		speed = PILOT_RUN if running else PILOT_WALK
+		running = (move_vec.length() > 0.85 or Input.is_physical_key_pressed(KEY_SHIFT)) and ads_t < 0.3
+		speed = (PILOT_RUN if running else PILOT_WALK) * lerpf(1.0, 0.5, ads_t)
 		step_h = PILOT_STEP
 	var mv := inp * speed * delta
 	var stand := map.height_at(pos)
@@ -743,7 +757,8 @@ func _fire_carbine() -> void:
 	recoil[0] = 1.0
 	shake = maxf(shake, 0.8)
 	Sfx.play("gun", -9.0, 0.05, 1.7)
-	_shoot(Vector2(rng.randf_range(-4.0, 4.0), rng.randf_range(-4.0, 4.0)), GameState.carbine_damage(), 2)
+	var spread := lerpf(4.0, 0.4, ads_t)
+	_shoot(Vector2(rng.randf_range(-spread, spread), rng.randf_range(-spread, spread)), GameState.carbine_damage(), 2)
 
 
 func _shoot(spread: Vector2, damage: float, g: int) -> void:
@@ -2377,6 +2392,12 @@ func _show_msg(text: String, dur: float) -> void:
 # =============================================================================
 
 func _input(event: InputEvent) -> void:
+	if loading:
+		return
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
+		# Right mouse button: aim down the sight while held (on foot).
+		ads_on = event.pressed
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		if state != State.PLAYING and end_time > 1.0 and event.keycode in [KEY_SPACE, KEY_ENTER, KEY_ESCAPE]:
 			_leave()
@@ -2411,6 +2432,10 @@ func _input(event: InputEvent) -> void:
 				return
 			if climb_t > 0.0 or phase == "drop" or phase == "lift":
 				return
+			if on_foot and climb_t <= 0.0 and p.distance_to(_aim_center(s)) < AIM_R * 1.2:
+				ads_on = not ads_on
+				Sfx.play("click", -6.0)
+				return
 			if p.distance_to(_fire_center(s)) < FIRE_R * 1.2:
 				fire_touch = event.index
 				return
@@ -2442,14 +2467,35 @@ func _input(event: InputEvent) -> void:
 			var v: Vector2 = (event.position - move_origin) / JOY_RADIUS
 			move_vec = v.limit_length(1.0) if v.length() > 0.12 else Vector2.ZERO
 		elif event.index == look_touch:
-			angle = wrapf(angle + (event.position.x - look_last_x) * LOOK_SENS, -PI, PI)
-			pitch -= (event.position.y - look_last_y) * PITCH_SENS
+			var aim_k := lerpf(1.0, 0.45, ads_t)
+			angle = wrapf(angle + (event.position.x - look_last_x) * LOOK_SENS * aim_k, -PI, PI)
+			pitch -= (event.position.y - look_last_y) * PITCH_SENS * aim_k
 			look_last_x = event.position.x
 			look_last_y = event.position.y
 		elif event.index == fire_touch:
 			# Sliding your thumb on the fire button also turns the mech.
 			angle = wrapf(angle + event.relative.x * LOOK_SENS * 0.7, -PI, PI)
 			pitch -= event.relative.y * PITCH_SENS * 0.7
+
+
+const AIM_R := 46.0
+
+
+func _aim_center(s: Vector2) -> Vector2:
+	return Vector2(s.x - 150.0, s.y - 330.0)
+
+
+func _ads_allowed() -> bool:
+	return on_foot and climb_t <= 0.0 and harvest_t <= 0.0 and carrying.is_empty() and state == State.PLAYING
+
+
+func _update_ads(delta: float) -> void:
+	## Aiming down the sight: the view narrows (zoom), the gun comes up to
+	## your eye, aim steadies, and you move slower.
+	if not _ads_allowed():
+		ads_on = false
+	ads_t = move_toward(ads_t, 1.0 if ads_on else 0.0, delta * 6.0)
+	FOV_PLANE = BASE_FOV / lerpf(1.0, ADS_ZOOM, ads_t * ads_t * (3.0 - 2.0 * ads_t))
 
 
 func _fire_center(s: Vector2) -> Vector2:
@@ -2611,6 +2657,10 @@ func _mech_button_rect(s: Vector2) -> Rect2:
 func _draw() -> void:
 	## World pass: floor, walls and roofs (fogged by world_fog.gdshader).
 	var s := get_viewport_rect().size
+	if loading:
+		draw_rect(Rect2(Vector2.ZERO, s), Color(0.03, 0.04, 0.05))
+		draw_string(ThemeDB.fallback_font, Vector2(s.x * 0.5 - 170, s.y * 0.5), "PREPARING MODELS…", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, Color(0.4, 1.0, 0.6))
+		return
 	cv = self
 	var proj_scale := s.x * 0.5 / FOV_PLANE
 	_draw_ground(s.x, s.y, horizon_y)
@@ -3284,11 +3334,15 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var sface := (pos - sfp).angle() + sin(time * 0.7 + o["anim"]) * 0.4
 				if o["freed"]:
 					sface = o.get("face", sface)
-				var st2: Texture2D = _view_frame("survivor", sface, sfp, time * (6.0 if o.get("moving", false) else 3.0) + o["anim"])
+				var look: String = ["a", "b", "c"][int(o["anim"] * 1000.0) % 3]
+				var skey := "survivor_" + look + ("_walk" if o.get("moving", false) else "")
+				if not tex3d.has(skey):
+					skey = "survivor"
+				var st2: Texture2D = _view_frame(skey, sface, sfp, time * (9.0 if o.get("moving", false) else 4.0) + o["anim"] * 10.0)
 				var smod := tint.lerp(FOG, fog * 0.6)
 				var sz: float = map.height_at(o["pos"])
 				_draw_shadow(sfp, sz, 0.18, horizon, proj_scale, fog, ty)
-				var sl: float = tex3d["survivor"]["L"]
+				var sl: float = tex3d[skey]["L"]
 				_billboard(st2, sx, ty, sl, sl, sz, smod, horizon, proj_scale, col_w)
 			7:
 				_draw_shadow(o["pos"], o["z"], 0.28, horizon, proj_scale, fog, ty)
@@ -3299,7 +3353,7 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var hk := "hazmat_cut" if o["state"] == "cut" else ("hazmat_carry" if o["carry"] > 0 else "hazmat_walk")
 				var hl: float = tex3d[hk]["L"]
 				_draw_shadow(o["pos"], o["z"], 0.16, horizon, proj_scale, fog, ty)
-				var hf: Texture2D = _view_frame(hk, o["face"], o["pos"], o["anim"] * (5.0 if o["state"] == "cut" else 6.0) if o["moving"] or o["state"] == "cut" else 0.0)
+				var hf: Texture2D = _view_frame(hk, o["face"], o["pos"], o["anim"] * (5.0 if o["state"] == "cut" else 9.0) if o["moving"] or o["state"] == "cut" else 0.0)
 				_billboard(hf, sx, ty, hl, hl, o["z"], tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
 				if o["state"] == "cut":
 					var br := _body_rect(sx, ty, 0.5, 0.7, o["z"], horizon, proj_scale)
@@ -3342,8 +3396,9 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 					var off := right * (float(n_on % 3) - 1.0) * 0.32
 					var spr := _project(o["pos"] + off)
 					if spr.y > 0.15:
-						var sl2: float = tex3d["survivor"]["L"] * 0.8
-						_billboard(_view_frame("survivor", (pos - o["pos"]).angle(), o["pos"], 0.0), spr.x, spr.y, sl2, sl2, o["fz"] + 1.32 + float(n_on / 3) * 0.1, tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+						var sk2 := "survivor_sit" if tex3d.has("survivor_sit") else "survivor"
+						var sl2: float = tex3d[sk2]["L"] * 0.8
+						_billboard(_view_frame(sk2, (pos - o["pos"]).angle(), o["pos"], time * 2.0 + n_on), spr.x, spr.y, sl2, sl2, o["fz"] + 1.32 + float(n_on / 3) * 0.1, tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
 					n_on += 1
 				if on_foot and _near_chest() and fmod(time, 0.8) < 0.5 and not carrying.is_empty():
 					_draw_brackets(_body_rect(sx, ty, 1.2, 1.4, o["fz"], horizon, proj_scale), Color(1.0, 0.75, 0.25))
@@ -3611,42 +3666,23 @@ func _draw_pilot_gun(w: float, h: float) -> void:
 	if not carrying.is_empty():
 		_draw_carried(w, h)
 		return
-	var g := _carbine_geom(w, h)
-	var base: Vector2 = g[0]
-	var tip: Vector2 = g[1]
-	var muz: Vector2 = g[2]
-	var dir := (tip - base).normalized()
-	var n := Vector2(-dir.y, dir.x)
-	# Gloved hand and sleeve
-	var grip := base.lerp(tip, 0.3)
-	cv.draw_colored_polygon(PackedVector2Array([Vector2(w + 20, h + 20), Vector2(w * 0.8, h + 20), grip - n * 20 + dir * 10, grip + n * 30 - dir * 10]), Color(0.85, 0.72, 0.12) if hazmat else Color(0.22, 0.25, 0.2))
-	cv.draw_circle(grip + n * 4, 26.0, _glove_col())
-	# Gun body, magazine, barrel and sight
-	cv.draw_colored_polygon(PackedVector2Array([base + n * 30, base - n * 26, tip - n * 12, tip + n * 14]), Color(0.2, 0.21, 0.23))
-	cv.draw_polyline(PackedVector2Array([base + n * 30, tip + n * 14, tip - n * 12]), Color(0.38, 0.4, 0.43), 2.0)
-	var mag := base.lerp(tip, 0.45)
-	cv.draw_colored_polygon(PackedVector2Array([mag - n * 14, mag - n * 14 + dir * 22, mag - n * 52 + dir * 16, mag - n * 50 - dir * 4]), Color(0.14, 0.14, 0.15))
-	cv.draw_line(tip, muz, Color(0.1, 0.1, 0.11), 10.0)
-	# Left hand gripping the barrel: palm underneath, fingers wrapped over
-	# the top, arm coming in from the bottom left.
-	var fore := base.lerp(tip, 0.74)
-	var sleeve := Color(0.85, 0.72, 0.12) if hazmat else Color(0.22, 0.25, 0.2)
-	var gc := _glove_col()
-	cv.draw_colored_polygon(PackedVector2Array([Vector2(w * 0.28, h + 40), Vector2(w * 0.44, h + 40), fore - n * 10.0 + dir * 22.0, fore - n * 34.0 - dir * 6.0]), sleeve)
-	cv.draw_colored_polygon(PackedVector2Array([fore - n * 12.0 - dir * 20.0, fore - n * 12.0 + dir * 24.0, fore - n * 38.0 + dir * 18.0, fore - n * 40.0 - dir * 14.0]), gc)
-	for k in 4:
-		var fp := fore + dir * (-14.0 + k * 11.0)
-		cv.draw_line(fp - n * 14.0, fp + n * 15.0, gc.darkened(0.45), 10.0)
-		cv.draw_line(fp - n * 13.0, fp + n * 13.0, gc, 7.0)
-	cv.draw_line(fore - n * 16.0 - dir * 22.0, fore + n * 4.0 - dir * 26.0, gc, 9.0)
-	var sight := base.lerp(tip, 0.7) + n * 16
-	cv.draw_rect(Rect2(sight - Vector2(5, 9), Vector2(10, 9)), Color(0.12, 0.12, 0.13))
-	cv.draw_circle(sight + Vector2(0, -4), 2.0, Color(0.4, 1.0, 0.6))
+	# The carbine, photographed from a real 3D model (see baker.gd).
+	var key := _carbine_key()
+	var e: Dictionary = Baker.fp[key]
+	var off := _carbine_offset()
+	cv.draw_texture(e["tex"], e["pos"] + off, tint.lerp(Color.WHITE, 0.35))
+	var muz := _muzzle_pos(2, w, h)
 	if muzzle[0] > 0.0:
-		cv.draw_texture_rect(surf["glow"], Rect2(muz + dir * 10.0 - Vector2(70, 70), Vector2(140, 140)), false, Color(1.0, 0.7, 0.3, 0.5))
-		cv.draw_set_transform(muz + dir * 12.0, dir.angle() + PI * 0.5, Vector2(0.7, 1.4))
+		var dir := (muz - Vector2(w * 0.85, h * 1.1)).normalized() if ads_t < 0.5 else Vector2(0, -1)
+		cv.draw_texture_rect(surf["glow"], Rect2(muz - Vector2(70, 70), Vector2(140, 140)), false, Color(1.0, 0.7, 0.3, 0.5))
+		cv.draw_set_transform(muz, dir.angle() + PI * 0.5, Vector2(0.7, 1.4) * (0.6 if ads_t > 0.5 else 1.0))
 		cv.draw_texture_rect(surf["fire"], Rect2(-22, -22, 44, 44), false, Color(1, 1, 1, 1))
 		cv.draw_set_transform(Vector2.ZERO)
+	if ads_t > 0.85:
+		# The red dot, projected onto the lens.
+		var c := Vector2(w, h) * 0.5
+		cv.draw_texture_rect(surf["glow"], Rect2(c - Vector2(14, 14), Vector2(28, 28)), false, Color(1.0, 0.15, 0.1, 0.9 * ads_t))
+		cv.draw_circle(c, 2.6, Color(1.0, 0.45, 0.4, ads_t))
 
 
 func _draw_visor(w: float, h: float) -> void:
@@ -3684,12 +3720,33 @@ func _draw_climb_overlay(w: float, h: float) -> void:
 	_text("CLIMBING OUT…" if climb_out else "CLIMBING IN…", Vector2(w * 0.5, h * 0.45), 30, Color(0.4, 1.0, 0.6, a))
 
 
+func _gun_sway() -> Vector2:
+	var k := 1.0 - ads_t * 0.85
+	return Vector2(sin(bob_t) * 12.0, absf(cos(bob_t)) * 9.0) * bob_amount * k
+
+
+func _carbine_key() -> String:
+	var hz := "_hz" if hazmat else ""
+	var rec := "_rec" if recoil[0] > 0.45 else ""
+	return ("carbine_ads" if ads_t >= 0.5 else "carbine_hip") + rec + hz
+
+
+func _carbine_offset() -> Vector2:
+	## Hip and aimed views slide past each other while you raise the gun.
+	var drop := ads_t * 2.0 if ads_t < 0.5 else (1.0 - ads_t) * 2.0
+	return _gun_sway() + Vector2(0, drop * 260.0)
+
+
 func _muzzle_pos(g: int, w: float, h: float) -> Vector2:
 	if g == 2:
-		return _carbine_geom(w, h)[2]
-	var tip := Vector2(w * 0.3, h * 0.77) if g == 0 else Vector2(w * 0.7, h * 0.77)
-	var base := Vector2(w * 0.12, h * 1.04) if g == 0 else Vector2(w * 0.88, h * 1.04)
-	return tip.lerp(base, recoil[g] * 0.08)
+		var e: Dictionary = Baker.fp[_carbine_key()]
+		return e["muzzle"] + _carbine_offset()
+	var key := ("arm_l" if g == 0 else "arm_r") + ("_rec" if recoil[g] > 0.4 else "")
+	return Baker.fp[key]["muzzle"] + _mech_sway()
+
+
+func _mech_sway() -> Vector2:
+	return Vector2(sin(bob_t) * 6.0, absf(cos(bob_t)) * 7.0) * bob_amount
 
 
 func _draw_tracers(w: float, h: float, horizon: float, proj_scale: float) -> void:
@@ -3704,32 +3761,27 @@ func _draw_tracers(w: float, h: float, horizon: float, proj_scale: float) -> voi
 
 
 func _draw_guns(w: float, h: float) -> void:
+	## Brigid's two autocannon arms, photographed from a 3D model.
+	var sway := _mech_sway()
 	for g in 2:
 		var arm := "left_arm" if g == 0 else "right_arm"
 		var alive: bool = parts[arm] > 0.0
+		var key := ("arm_l" if g == 0 else "arm_r") + ("_rec" if recoil[g] > 0.4 and alive else "")
+		var e: Dictionary = Baker.fp[key]
+		var mod := tint.lerp(Color.WHITE, 0.3) * 0.85
+		mod.a = 1.0
+		if not alive:
+			mod = Color(0.35, 0.3, 0.28)
+		cv.draw_texture(e["tex"], e["pos"] + sway, mod)
 		var tip := _muzzle_pos(g, w, h)
-		var base := Vector2(w * 0.12, h * 1.04) if g == 0 else Vector2(w * 0.88, h * 1.04)
-		var dir := (tip - base).normalized()
-		var n := Vector2(-dir.y, dir.x)
-		var body_col := Color(0.26, 0.28, 0.3) if alive else Color(0.12, 0.1, 0.1)
-		body_col = Color(body_col.r * tint.r * 1.2, body_col.g * tint.g * 1.2, body_col.b * tint.b * 1.2)
-		var poly := PackedVector2Array([base + n * 56, base - n * 56, tip - n * 18, tip + n * 18])
-		# Gunmetal: light catching the upper edge, darker underneath.
-		var hi_c := body_col.lightened(0.35)
-		var lo_c := body_col.darkened(0.45)
-		cv.draw_polygon(poly, PackedColorArray([hi_c if g == 1 else lo_c, lo_c if g == 1 else hi_c, lo_c if g == 1 else hi_c, hi_c if g == 1 else lo_c]))
-		cv.draw_polyline(PackedVector2Array([base + n * 56, tip + n * 18, tip - n * 18]), Color(0.45, 0.48, 0.5), 2.0)
-		# Barrel shroud with cooling slots
-		for i in 3:
-			var p := tip.lerp(base, 0.15 + i * 0.12)
-			cv.draw_line(p + n * 14, p - n * 14, Color(0.1, 0.1, 0.12), 3.0)
 		if not alive:
 			if rng.randf() < 0.35:
-				var sp := tip.lerp(base, rng.randf_range(0.0, 0.5))
+				var sp := tip + Vector2(rng.randf_range(-60, 60), rng.randf_range(0, 120))
 				cv.draw_line(sp, sp + Vector2.from_angle(rng.randf() * TAU) * 14.0, Color(1.0, 0.85, 0.3), 2.0)
 			continue
 		if muzzle[g] > 0.0:
-			var fl := tip + dir * 30.0
+			var dir := (tip - Vector2(w * (0.0 if g == 0 else 1.0), h)).normalized()
+			var fl := tip + dir * 20.0
 			cv.draw_texture_rect(surf["glow"], Rect2(fl - Vector2(110, 110), Vector2(220, 220)), false, Color(1.0, 0.7, 0.3, 0.55))
 			cv.draw_set_transform(fl, dir.angle() + PI * 0.5 + rng.randf_range(-0.3, 0.3), Vector2(0.8, 1.6))
 			cv.draw_texture_rect(surf["fire"], Rect2(-34, -34, 68, 68), false, Color(1, 1, 1, 1))
@@ -3790,15 +3842,17 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	var hud := Color(0.4, 1.0, 0.6)
 	var locked := locked_target != null
 	var cc := Vector2(w * 0.5, h * 0.5)
-	# Horizon ticks so you can tell how far up or down you're looking.
-	for sgn in [-1.0, 1.0]:
-		cv.draw_line(Vector2(w * 0.5 + sgn * 70.0, horizon), Vector2(w * 0.5 + sgn * 120.0, horizon), Color(0.4, 1.0, 0.6, 0.45), 2.0)
-	var ch_col := Color(1.0, 0.3, 0.2) if locked else hud
-	var ch_r := 12.0 if on_foot else 22.0
-	cv.draw_arc(cc, ch_r, 0, TAU, 32, ch_col, 2.0)
-	for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
-		cv.draw_line(cc + d * ch_r * 0.45, cc + d * ch_r * 1.35, ch_col, 2.0)
-	cv.draw_circle(cc, 2.0, ch_col)
+	if _in_cockpit_view():
+		_draw_targeting(w, h, horizon, proj_scale)
+	elif climb_t <= 0.0 and ads_t < 0.6 and harvest_t <= 0.0:
+		# On foot, from the hip: a small open crosshair that fades as you aim.
+		var a := 0.85 * (1.0 - ads_t / 0.6)
+		var cc2 := Color(1, 1, 1, a)
+		var gap := 7.0 + 5.0 * bob_amount
+		for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
+			cv.draw_line(cc + d * gap, cc + d * (gap + 9.0), Color(0, 0, 0, a * 0.5), 3.5)
+			cv.draw_line(cc + d * gap, cc + d * (gap + 9.0), cc2, 1.5)
+		cv.draw_circle(cc, 1.5, Color(1.0, 0.35, 0.3, a) if locked else cc2)
 
 	# Objective bar
 	_text(_objective_string(), Vector2(w * 0.5, h * 0.06 + 30.0), 20, Color(1.0, 0.9, 0.4) if objective_done else hud)
@@ -3893,6 +3947,86 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	_text(("%s ROCKETS" % _ammo_str("rockets")) + (" READY" if rk_ready >= 1.0 else " · RELOADING"), bar.get_center() + Vector2(0, 30), 14, hud if ammo_left["rockets"] > 0 else Color(1, 0.3, 0.2))
 
 	_draw_hud_messages(w, h, cc)
+
+
+func _draw_targeting(w: float, h: float, horizon: float, ps: float) -> void:
+	## Brigid's gunsight: a fighter-style head-up display projected on the
+	## canopy. Heading tape, pitch ladder, aiming reticle with laser range,
+	## and a readout for whatever the reticle is on.
+	var amber := Color(0.6, 1.0, 0.7, 1.0)
+	var dim := Color(0.6, 1.0, 0.7, 0.7)
+	var shade := Color(0, 0, 0, 0.35)
+	var cc := Vector2(w * 0.5, h * 0.5)
+	var locked := locked_target != null
+	# Heading tape along the top of the canopy.
+	var hdg := fposmod(rad_to_deg(angle) + 90.0, 360.0)
+	var tape_y := h * 0.135
+	var px_per_deg := ps * deg_to_rad(1.0)
+	for i in range(-40, 41):
+		var deg := floorf(hdg) + i
+		var x := cc.x + (deg - hdg) * px_per_deg
+		if x < w * 0.3 or x > w * 0.7:
+			continue
+		var dg := int(fposmod(deg, 360.0))
+		if dg % 10 == 0:
+			var tall := 10.0 if dg % 30 == 0 else 6.0
+			cv.draw_line(Vector2(x, tape_y), Vector2(x, tape_y + tall), amber if dg % 30 == 0 else dim, 1.5)
+			if dg % 30 == 0:
+				var lbl: String = {0: "N", 90: "E", 180: "S", 270: "W"}.get(dg, "%02d" % (dg / 10))
+				_text(lbl, Vector2(x, tape_y - 4.0), 14, amber)
+	cv.draw_colored_polygon(PackedVector2Array([Vector2(cc.x, tape_y + 13), Vector2(cc.x - 6, tape_y + 22), Vector2(cc.x + 6, tape_y + 22)]), amber)
+	_text("%03d" % int(hdg), Vector2(cc.x, tape_y + 38), 15, amber)
+	# Pitch ladder: lines every 10 degrees of look, numbered, broken in the middle.
+	var deg_px := ps * deg_to_rad(10.0)
+	for k in range(-4, 5):
+		var y := horizon - k * deg_px
+		if y < h * 0.2 or y > h * 0.82:
+			continue
+		var half := 110.0 if k == 0 else 70.0
+		var col := amber if k == 0 else dim
+		for sgn in [-1.0, 1.0]:
+			var x0: float = cc.x + sgn * 46.0
+			var x1: float = cc.x + sgn * half
+			if k < 0:
+				# Below the horizon: dashed.
+				var xx: float = x0
+				while absf(xx - x0) < absf(x1 - x0):
+					cv.draw_line(Vector2(xx, y), Vector2(xx + sgn * 8.0, y), col, 1.5)
+					xx += sgn * 14.0
+			else:
+				cv.draw_line(Vector2(x0, y), Vector2(x1, y), col, 1.5)
+			cv.draw_line(Vector2(x1, y), Vector2(x1, y + (6.0 if k > 0 else -6.0)), col, 1.5)
+			if k != 0:
+				_text("%d" % (k * 10), Vector2(x1 + sgn * 16.0, y + 5.0), 12, col)
+	# Reticle: open circle with a centre pip and range ticks.
+	var rcol := Color(1.0, 0.35, 0.25, 0.95) if locked else amber
+	cv.draw_arc(cc, 26.0, 0, TAU, 40, shade, 4.0)
+	cv.draw_arc(cc, 26.0, 0, TAU, 40, rcol, 1.6)
+	for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1)]:
+		cv.draw_line(cc + d * 30.0, cc + d * 44.0, rcol, 1.6)
+	cv.draw_circle(cc, 2.2, rcol)
+	# Laser range to whatever the reticle is on.
+	var imp := _aim_impact(Vector2.ZERO)
+	var rng_m: float = (imp["pos"] as Vector2).distance_to(pos) * 2.0
+	if locked:
+		var tp: Vector2 = locked_target["pos"]
+		rng_m = tp.distance_to(pos) * 2.0
+	var range_txt := "---" if imp["kind"] == "sky" and not locked else "%d m" % int(rng_m)
+	# Range arc: fills clockwise as targets get closer (full at 0 m, empty at 200).
+	var fill := clampf(1.0 - rng_m / 200.0, 0.0, 1.0)
+	if range_txt != "---":
+		cv.draw_arc(cc, 32.0, -PI * 0.5, -PI * 0.5 + TAU * fill, 32, rcol, 2.0)
+	_text("RNG " + range_txt, cc + Vector2(64, 5), 14, rcol)
+	if locked:
+		var tk: String = locked_target["kind"]
+		var hp_r: float = clampf(locked_target["hp"] / locked_target["max"], 0.0, 1.0)
+		_text(tk.to_upper(), cc + Vector2(0, 64), 15, rcol)
+		var bar := Rect2(cc.x - 40, cc.y + 72, 80, 4)
+		cv.draw_rect(bar, Color(0, 0, 0, 0.5))
+		cv.draw_rect(Rect2(bar.position, Vector2(bar.size.x * hp_r, bar.size.y)), rcol)
+	# Look elevation readout on the left.
+	var pitch_deg := rad_to_deg(atan((horizon - h * 0.5) / ps))
+	_text("%+03d°" % int(pitch_deg), cc + Vector2(-150, 5), 14, dim)
 
 
 func _draw_hud_messages(w: float, h: float, cc: Vector2) -> void:
@@ -4100,6 +4234,14 @@ func _draw_touch_controls(w: float, h: float) -> void:
 	if climb_t > 0.0:
 		return
 	if on_foot:
+		var ac := _aim_center(Vector2(w, h))
+		var aim_on := ads_on
+		cv.draw_circle(ac, AIM_R, Color(0.9, 0.9, 0.9, 0.35 if aim_on else 0.15))
+		cv.draw_arc(ac, AIM_R, 0, TAU, 36, Color(1, 1, 1, 0.8), 2.5)
+		cv.draw_arc(ac, AIM_R * 0.45, 0, TAU, 24, Color(1, 1, 1, 0.8), 2.0)
+		cv.draw_line(ac + Vector2(-AIM_R * 0.7, 0), ac + Vector2(-AIM_R * 0.25, 0), Color(1, 1, 1, 0.8), 2.0)
+		cv.draw_line(ac + Vector2(AIM_R * 0.25, 0), ac + Vector2(AIM_R * 0.7, 0), Color(1, 1, 1, 0.8), 2.0)
+		_text("AIM", ac + Vector2(0, AIM_R + 18), 15, Color(1, 1, 1, 0.7))
 		var jc := _rocket_center(Vector2(w, h))
 		cv.draw_circle(jc, ROCKET_R, Color(0.3, 0.7, 1.0, 0.35 if jump_z <= 0.0 else 0.15))
 		cv.draw_arc(jc, ROCKET_R, 0, TAU, 40, Color(0.6, 0.85, 1.0, 0.9), 3.0)

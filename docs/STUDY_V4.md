@@ -1,4 +1,4 @@
-# Study for version 4: real things, real gear, a world that never sleeps
+# Study: real things, real gear, a world that never sleeps (versions 1.4–1.9)
 
 This is the plan for the next big round of changes. It is too much for one
 update, so it ends with a roadmap of five updates and the decisions that
@@ -218,11 +218,12 @@ The screen is already busy, so new actions must not just add buttons.
 
 | Update | Name | Contents | Size |
 |---|---|---|---|
-| **4.0** | New Flesh | Bake system (Godot 3D → sprites, cached); redo all aliens, Brigid, Chest, people and props; first-person guns baked | Large |
-| **4.1** | Never Clean | Threat director, roamers, alien targeting of crew, survivors and Chest; crew from the base with names, health and death; crew orders; Chest armour | Medium |
-| **4.2** | Up and Over | Mech jump jets and pilot jetpack with fuel; rooftops; landing damage; fuel economy | Medium |
-| **4.3** | The Workshop | Hardpoints, 15+ mech parts, weight/power/heat, damage types and resistances, Workshop building and tab | Large |
-| **4.4** | Boots on the Ground | Pilot loadout: guns, grenades, tools, suits | Medium |
+| **1.4** | New Flesh, part 1 (done) | Bake system (Godot 3D → sprites, cached); people and first-person guns; aim down the sight; cockpit gunsight | Large |
+| **1.5** | New Flesh, part 2 | Aliens, Brigid seen from outside, the Chest and props in the new style | Large |
+| **1.6** | Never Clean | Threat director, roamers, alien targeting of crew, survivors and Chest; crew from the base with names, health and death; crew orders; Chest armour | Medium |
+| **1.7** | Up and Over | Mech jump jets and pilot jetpack with fuel; rooftops; landing damage; fuel economy | Medium |
+| **1.8** | The Workshop | Hardpoints, 15+ mech parts, weight/power/heat, damage types and resistances, Workshop building and tab | Large |
+| **1.9** | Boots on the Ground | Pilot loadout: guns, grenades, tools, suits | Medium |
 
 Why this order:
 - **New art first,** so every new weapon and part is made the new way

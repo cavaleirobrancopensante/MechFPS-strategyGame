@@ -19,6 +19,18 @@ func _ready() -> void:
 	theme = _make_theme()
 	_mech_tex = ImageTexture.create_from_image(ModelArt._render(ModelArt._mech(), 0.35, 160, 2.3))
 	_build()
+	# Build (or load) the 3D-photographed people and weapons in the
+	# background while you're on the menu.
+	if not Baker.done:
+		var lbl := Label.new()
+		lbl.add_theme_font_size_override("font_size", 15)
+		lbl.add_theme_color_override("font_color", Color(0.6, 0.8, 0.7))
+		lbl.position = Vector2(20, 690)
+		lbl.text = "Preparing models…"
+		add_child(lbl)
+		Baker.progress.connect(func(f, what): if is_instance_valid(lbl): lbl.text = "Preparing models… %s %d%%" % [what, int(f * 100.0)])
+		Baker.finished.connect(func(): if is_instance_valid(lbl): lbl.queue_free())
+		Baker.bake()
 
 
 func _process(delta: float) -> void:
