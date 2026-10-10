@@ -21,6 +21,9 @@ static func build_all() -> Dictionary:
 	out["crawler"] = _view_set(1.0, 64, 4, func(ph): return _crawler(ph))
 	out["spitter"] = _view_set(1.25, 64, 2, func(ph): return _spitter(ph))
 	out["brute"] = _view_set(1.95, 96, 4, func(ph): return _brute(ph))
+	out["flyer"] = _view_set(1.5, 64, 4, func(ph): return _flyer(ph))
+	out["burrower"] = _view_set(2.0, 96, 4, func(ph): return _burrower(ph))
+	out["mound"] = _view_set(1.3, 48, 2, func(ph): return _mound(ph))
 	out["hive"] = _view_set(2.2, 96, 2, func(ph): return _hive(ph, 1.0, Color(0.48, 0.14, 0.36)))
 	out["mother"] = _view_set(3.9, 128, 2, func(ph): return _hive(ph, 1.75, Color(0.55, 0.12, 0.2)))
 	out["survivor"] = _view_set(0.9, 48, 2, func(ph): return _survivor(ph))
@@ -239,6 +242,81 @@ static func _spitter(ph: float) -> Array:
 		parts.append(_seg(hip, knee, 0.06, leg))
 		parts.append(_seg(knee, foot, 0.05, leg))
 		parts.append(_ell(foot + Vector3(0, 0, 0.05), Vector3(0.06, 0.03, 0.09), leg))
+	return parts
+
+
+static func _flyer(ph: float) -> Array:
+	## A wasp-like gnat: thorax, a stinger abdomen hanging low, glowing eyes,
+	## two pairs of beating wings. Hovers (the battle code lifts it up).
+	var shell := Color(0.62, 0.34, 0.16)
+	var dark := Color(0.25, 0.12, 0.08)
+	var wing := Color(0.75, 0.9, 0.85)
+	var beat := sin(ph * TAU)
+	var parts: Array = [
+		_ell(Vector3(0, 0.72, 0.05), Vector3(0.16, 0.15, 0.2), shell, Vector3.ZERO, 0.5),
+		_ell(Vector3(0, 0.6, -0.28), Vector3(0.13, 0.13, 0.26), shell.lightened(0.1), Vector3(-0.6, 0, 0), 0.5),
+		_ell(Vector3(0, 0.62, -0.26), Vector3(0.14, 0.03, 0.2), Color(0.95, 0.75, 0.15), Vector3(-0.6, 0, 0)),
+		_seg(Vector3(0, 0.46, -0.43), Vector3(0, 0.3, -0.5), 0.025, Color(0.9, 0.9, 0.8), 0.5),
+		_ell(Vector3(0, 0.76, 0.3), Vector3(0.12, 0.11, 0.11), shell.darkened(0.1), Vector3.ZERO, 0.4),
+		_ball(Vector3(-0.07, 0.8, 0.38), 0.045, Color(0.3, 1.0, 0.9), true),
+		_ball(Vector3(0.07, 0.8, 0.38), 0.045, Color(0.3, 1.0, 0.9), true),
+		_seg(Vector3(-0.04, 0.7, 0.38), Vector3(-0.06, 0.6, 0.48), 0.018, dark),
+		_seg(Vector3(0.04, 0.7, 0.38), Vector3(0.06, 0.6, 0.48), 0.018, dark),
+	]
+	for side in [-1.0, 1.0]:
+		for k in 2:
+			var flap: float = beat * 0.9 * (1.0 if k == 0 else -0.7)
+			var root := Vector3(side * 0.1, 0.84, 0.1 - k * 0.14)
+			var tip := root + Vector3(side * 0.55 * cos(flap), 0.55 * sin(flap) + 0.05, -0.12 - k * 0.1)
+			var c := (root + tip) * 0.5
+			parts.append(_ell(c, Vector3(0.3, 0.025, 0.12 - k * 0.02), wing, Vector3(0, 0, side * flap), 0.9))
+		for k in 3:
+			parts.append(_seg(Vector3(side * 0.1, 0.62, 0.12 - k * 0.1), Vector3(side * 0.2, 0.42, 0.16 - k * 0.12), 0.018, dark))
+	return parts
+
+
+static func _burrower(ph: float) -> Array:
+	## A digger: armoured segments like a pillbug, a bony plough-snout and
+	## two big shovel claws.
+	var plate := Color(0.5, 0.4, 0.3)
+	var belly := Color(0.7, 0.55, 0.42)
+	var bone := Color(0.92, 0.88, 0.75)
+	var sw := sin(ph * TAU)
+	var parts: Array = []
+	for k in 5:
+		var z := 0.35 - k * 0.2
+		var y := 0.48 + 0.07 * sin(k * 0.9) - k * 0.03
+		var r := 0.42 - absf(k - 1.2) * 0.06
+		parts.append(_ell(Vector3(0, y, z), Vector3(r, r * 0.8, 0.14), plate.lightened(0.06 * (k % 2)), Vector3.ZERO, 0.45))
+	parts.append(_ell(Vector3(0, 0.3, 0.0), Vector3(0.3, 0.16, 0.5), belly))
+	parts.append(_ell(Vector3(0, 0.42, 0.62), Vector3(0.2, 0.17, 0.22), plate.darkened(0.15), Vector3(0.3, 0, 0), 0.4))
+	parts.append(_seg(Vector3(0, 0.45, 0.75), Vector3(0, 0.28, 0.98), 0.06, bone, 0.5))
+	parts.append(_ball(Vector3(-0.1, 0.55, 0.72), 0.03, Color(1.0, 0.5, 0.1), true))
+	parts.append(_ball(Vector3(0.1, 0.55, 0.72), 0.03, Color(1.0, 0.5, 0.1), true))
+	for side in [-1.0, 1.0]:
+		var s: float = sw * side
+		var shoulder := Vector3(side * 0.28, 0.4, 0.45)
+		var hand := Vector3(side * 0.45, 0.12 + maxf(0.0, s) * 0.12, 0.72 + s * 0.12)
+		parts.append(_seg(shoulder, hand, 0.07, plate.darkened(0.2)))
+		parts.append(_ell(hand + Vector3(0, -0.02, 0.06), Vector3(0.13, 0.04, 0.12), bone, Vector3(0.3, 0, 0), 0.4))
+		for k in 2:
+			var z2 := 0.1 - k * 0.3
+			var ss: float = s if k == 0 else -s
+			parts.append(_seg(Vector3(side * 0.25, 0.3, z2), Vector3(side * 0.38, 0.03, z2 + ss * 0.1), 0.04, plate.darkened(0.35)))
+	return parts
+
+
+static func _mound(ph: float) -> Array:
+	## Churned earth over something digging toward you.
+	var dirt := Color(0.36, 0.26, 0.18)
+	var parts: Array = [
+		_ell(Vector3(0, 0.0, 0), Vector3(0.55, 0.22, 0.6), dirt, Vector3.ZERO, 0.05),
+		_ell(Vector3(0.1, 0.12, 0.1), Vector3(0.3, 0.16, 0.3), dirt.lightened(0.1), Vector3.ZERO, 0.05),
+	]
+	for k in 6:
+		var a := k * 1.05 + ph * 2.0
+		var r := 0.3 + 0.15 * float(k % 2)
+		parts.append(_ell(Vector3(cos(a) * r, 0.1 + 0.06 * sin(ph * TAU + k), sin(a) * r), Vector3(0.08, 0.06, 0.07), dirt.darkened(0.2) if k % 2 == 0 else Color(0.45, 0.42, 0.4), Vector3(0, a, 0)))
 	return parts
 
 
