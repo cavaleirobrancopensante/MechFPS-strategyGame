@@ -185,18 +185,27 @@ static func _render(parts: Array, yaw: float, size: int, box: float) -> Image:
 					img.set_pixel(i, j, col)
 					continue
 				var n := (a.transposed() * n_local).normalized()
-				var lam := maxf(0.0, n.dot(light))
-				var spec := pow(maxf(0.0, n.dot(half_v)), 24.0) * gloss
-				var rim := pow(1.0 - maxf(0.0, n.z), 3.0) * 0.12
-				var k2 := 0.36 + 0.72 * lam
-				img.set_pixel(i, j, Color(minf(1.0, col.r * k2 + spec + rim * 0.4), minf(1.0, col.g * k2 + spec + rim * 0.5), minf(1.0, col.b * k2 + spec + rim * 0.7), 1.0))
+				# Wrapped diffuse, sky/ground ambient, a little specular and
+				# rim light, surface mottling and contact darkening near the
+				# ground: closer to a lit photo than a cartoon.
+				var lam := clampf((n.dot(light) + 0.25) / 1.25, 0.0, 1.0)
+				var hemi := lerpf(0.2, 0.46, 0.5 + 0.5 * n.y)
+				var spec := pow(maxf(0.0, n.dot(half_v)), 28.0) * gloss * 0.9
+				var rim := pow(1.0 - maxf(0.0, n.z), 3.0) * 0.1
+				var lp := q0 + qd * t
+				var mott := 0.5 + 0.5 * sin(lp.x * 7.1 + sin(lp.y * 5.3) * 1.7) * sin(lp.z * 6.7 + lp.y * 3.1 + p["c"].x * 13.0)
+				var grain := fposmod(sin(float(i * 131 + j * 17)) * 43758.5453, 1.0)
+				var alb := 0.82 + 0.26 * mott + (grain - 0.5) * 0.06
+				var ao := clampf(0.62 + wy / box * 1.6, 0.62, 1.0)
+				var k2 := (hemi + 0.78 * lam) * alb * ao
+				img.set_pixel(i, j, Color(minf(1.0, col.r * k2 + spec + rim * 0.35), minf(1.0, col.g * k2 + spec + rim * 0.4), minf(1.0, col.b * k2 + spec + rim * 0.5), 1.0))
 	_outline(img, size)
 	return img
 
 
 static func _outline(img: Image, size: int) -> void:
 	var src := img.duplicate() as Image
-	var oc := Color(0.04, 0.04, 0.05, 1.0)
+	var oc := Color(0.03, 0.03, 0.03, 0.45)
 	for y in size:
 		for x in size:
 			if src.get_pixel(x, y).a > 0.5:
@@ -653,28 +662,48 @@ static func _beacon(lit: bool) -> Array:
 # --- Scenery -----------------------------------------------------------------
 
 static func _pine() -> Array:
-	var parts: Array = [_seg(Vector3(0, 0, 0), Vector3(0, 0.9, 0), 0.08, Color(0.35, 0.24, 0.15))]
-	var green := Color(0.16, 0.36, 0.2)
-	for i in 4:
-		var y := 0.7 + i * 0.55
-		var r := 0.85 - i * 0.18
-		parts.append(_ell(Vector3(0.02 * i, y, 0), Vector3(r, 0.42, r), green.lightened(i * 0.05), Vector3.ZERO, 0.1))
-	parts.append(_ell(Vector3(0, 2.75, 0), Vector3(0.2, 0.35, 0.2), green.lightened(0.2)))
+	## A conifer built from dozens of drooping needle clumps on tiers, so it
+	## has a ragged, believable silhouette instead of stacked balls.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 404
+	var parts: Array = [_seg(Vector3(0, 0, 0), Vector3(0, 2.6, 0), 0.07, Color(0.3, 0.21, 0.14))]
+	var tiers := 7
+	for t in tiers:
+		var k := float(t) / (tiers - 1)
+		var y := 0.55 + k * 2.2
+		var r := lerpf(0.95, 0.18, k)
+		var n := int(lerpf(9.0, 4.0, k))
+		for i in n:
+			var a := TAU * i / n + rng.randf_range(-0.3, 0.3) + t * 0.7
+			var reach := r * rng.randf_range(0.6, 1.0)
+			var tip := Vector3(cos(a) * reach, y - reach * 0.35, sin(a) * reach)
+			var g := Color(0.1, 0.26, 0.14).lerp(Color(0.2, 0.36, 0.18), rng.randf())
+			parts.append(_seg(Vector3(0, y + 0.05, 0), tip, 0.09 + 0.1 * (1.0 - k), g, 0.05))
+			parts.append(_ell(tip * 0.7 + Vector3(0, y * 0.3 - 0.02, 0) * 0.0, Vector3(0.22, 0.12, 0.22) * (1.2 - k * 0.6), g.darkened(0.1), Vector3(0, a, 0), 0.05))
+	parts.append(_ell(Vector3(0, 2.85, 0), Vector3(0.12, 0.28, 0.12), Color(0.18, 0.34, 0.18)))
 	return parts
 
 
 static func _tree() -> Array:
-	var bark := Color(0.38, 0.27, 0.17)
-	var leaf := Color(0.24, 0.42, 0.18)
-	return [
-		_seg(Vector3(0, 0, 0), Vector3(0.05, 1.4, 0), 0.12, bark),
-		_seg(Vector3(0.03, 1.1, 0), Vector3(0.5, 1.7, 0.1), 0.06, bark),
-		_seg(Vector3(0.03, 1.2, 0), Vector3(-0.45, 1.8, -0.1), 0.06, bark),
-		_ell(Vector3(0, 2.05, 0), Vector3(0.95, 0.75, 0.9), leaf, Vector3.ZERO, 0.1),
-		_ell(Vector3(0.5, 1.8, 0.25), Vector3(0.55, 0.45, 0.5), leaf.lightened(0.08)),
-		_ell(Vector3(-0.5, 1.85, -0.2), Vector3(0.5, 0.45, 0.5), leaf.darkened(0.08)),
-		_ell(Vector3(0.1, 2.5, 0.1), Vector3(0.5, 0.35, 0.45), leaf.lightened(0.15)),
+	## A broadleaf tree: forked trunk and a canopy of many leaf clumps,
+	## darker inside and underneath.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 505
+	var bark := Color(0.33, 0.25, 0.18)
+	var parts: Array = [
+		_seg(Vector3(0, 0, 0), Vector3(0.05, 1.3, 0), 0.12, bark),
+		_seg(Vector3(0.04, 1.1, 0), Vector3(0.55, 1.75, 0.1), 0.065, bark),
+		_seg(Vector3(0.03, 1.2, 0), Vector3(-0.5, 1.85, -0.12), 0.065, bark),
+		_seg(Vector3(0.05, 1.3, 0), Vector3(0.0, 2.1, 0.3), 0.06, bark),
 	]
+	for i in 34:
+		var d := Vector3(rng.randf_range(-1, 1), rng.randf_range(-0.55, 0.8), rng.randf_range(-1, 1)).normalized()
+		var c := Vector3(0, 2.0, 0) + Vector3(d.x * 0.85, d.y * 0.6, d.z * 0.8) * rng.randf_range(0.55, 1.0)
+		var rad := rng.randf_range(0.2, 0.34)
+		var shade := clampf(0.5 + d.y * 0.4 + rng.randf_range(-0.15, 0.15), 0.0, 1.0)
+		var g := Color(0.13, 0.27, 0.1).lerp(Color(0.32, 0.48, 0.2), shade)
+		parts.append(_ell(c, Vector3(rad, rad * 0.8, rad), g, Vector3(0, rng.randf() * TAU, 0), 0.08))
+	return parts
 
 
 static func _car() -> Array:

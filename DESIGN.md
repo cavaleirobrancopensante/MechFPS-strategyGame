@@ -28,6 +28,29 @@ the swarm.
 - No 3D models, no image files: all sprites and sounds are generated
   in code, so the project stays tiny and easy to edit on a phone.
 
+## Look (3.4)
+Still the 2.5D column renderer, but drawn to look as real as it can:
+- **Textured surfaces**, generated at start-up (`scripts/battle/surfaces.gd`):
+  concrete with slab joints and rain streaks, brick, rusty corrugated
+  metal, riveted steel plates, alien flesh with veins, rubble, layered
+  earth; ground types per zone (gravel, wet asphalt with puddles, snow,
+  grass and mud, quarry dust, concrete slabs, alien creep). Each wall
+  column samples the texture at full detail; wall bases get grime.
+- **Light**: every zone has a sun (or moon) direction, colour and height
+  plus sky ambient; walls are lit by which way they face, roofs and ground
+  by the sun's height, sprites by both. Contact shadows where walls meet
+  the ground.
+- **Atmosphere**: per-pixel distance haze (`world_fog.gdshader`), sky
+  gradient, sun glow, two layers of drifting cloud, hazy horizon.
+- **Models** are shaded with wrapped light, sky/ground ambient, surface
+  mottling and contact darkening, and drawn with smooth filtering; trees
+  are built from dozens of leaf and needle clumps.
+- **Effects**: textured fireballs, smoke puffs, muzzle flames, cockpit
+  glass grime, gunmetal shading.
+- **Film pass** (`post.gdshader`): bloom, contrast and per-zone colour
+  grade, vignette, slight lens fringing and grain. The HUD sits above it.
+- Graphics setting: Low skips the film pass and uses fewer columns.
+
 ## Terrain
 | Feature | Height | Notes |
 |---|---|---|
@@ -240,6 +263,7 @@ coloured by type, briefing on the right, LAUNCH always visible),
 hints like "3 idle" or "! repair".
 
 ## Roadmap
+- **3.4:** graphics overhaul for a realistic look (textures, sun lighting, haze, clouds, better models and effects, film pass).
 - **3.3:** jump on foot (and the pilot now climbs any step Brigid can); the harvest team; stack up to 6 biomass jars; the carbine's left hand grips the barrel.
 - **3.2:** alien bodies stay; the Chest (cargo walker) that everything must be carried to; hazmat suit and biomass harvesting; survivors follow you to the Chest.
 - **3.1:** two new aliens: the Flyer and the Burrower.
