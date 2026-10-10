@@ -16,6 +16,13 @@ static func build_all() -> Dictionary:
 		"mech_front": [_mech(false)],
 		"mech_back": [_mech(true)],
 		"cache": [_cache(0), _cache(1)],
+		"survivor": [_survivor(0), _survivor(1)],
+		"item_fuel": [_canister()],
+		"item_data": [_datacore(0), _datacore(1)],
+		"item_supply": [_cache(0), _cache(1)],
+		"beacon_off": [_beacon(false)],
+		"beacon_on": [_beacon(true)],
+		"dropship": [_dropship(0), _dropship(1)],
 	}
 
 
@@ -150,6 +157,76 @@ static func _cache(frame: int) -> ImageTexture:
 	var glow := Color(0.4, 1.0, 0.6) if frame == 0 else Color(0.75, 1.0, 0.8)
 	_dot(img, 32, 33, 4.0 if frame == 0 else 5.0, glow)
 	_outline(img, Color(0.08, 0.06, 0.03))
+	return ImageTexture.create_from_image(img)
+
+
+static func _survivor(frame: int) -> ImageTexture:
+	## A person waving for help.
+	var img := _blank()
+	var coat := Color(0.75, 0.35, 0.2)
+	_box(img, 27, 44, 30, 63, Color(0.2, 0.22, 0.3))
+	_box(img, 33, 44, 36, 63, Color(0.2, 0.22, 0.3))
+	_box(img, 25, 26, 38, 46, coat)
+	_dot(img, 31.5, 20, 5.5, Color(0.9, 0.75, 0.62))
+	_box(img, 26, 13, 37, 16, Color(0.3, 0.2, 0.15))
+	# One arm waving
+	if frame == 0:
+		_line(img, Vector2(37, 28), Vector2(46, 14), 3, coat)
+	else:
+		_line(img, Vector2(37, 28), Vector2(48, 20), 3, coat)
+	_line(img, Vector2(26, 28), Vector2(22, 42), 3, coat)
+	_outline(img, Color(0.08, 0.06, 0.05))
+	return ImageTexture.create_from_image(img)
+
+
+static func _canister() -> ImageTexture:
+	var img := _blank()
+	_box(img, 22, 30, 42, 63, Color(0.8, 0.2, 0.15))
+	_box(img, 26, 25, 34, 30, Color(0.3, 0.3, 0.3))
+	_box(img, 24, 42, 40, 48, Color(0.95, 0.85, 0.2))
+	_outline(img, Color(0.1, 0.03, 0.02))
+	return ImageTexture.create_from_image(img)
+
+
+static func _datacore(frame: int) -> ImageTexture:
+	var img := _blank()
+	_box(img, 20, 40, 44, 63, Color(0.18, 0.2, 0.24))
+	_box(img, 24, 44, 40, 48, Color(0.3, 0.9, 1.0) if frame == 0 else Color(0.6, 1.0, 1.0))
+	_box(img, 24, 52, 30, 55, Color(1.0, 0.5, 0.2))
+	_dot(img, 32, 34, 3.0 + frame, Color(0.4, 0.9, 1.0))
+	_outline(img, Color(0.02, 0.05, 0.08))
+	return ImageTexture.create_from_image(img)
+
+
+static func _beacon(on: bool) -> ImageTexture:
+	var img := _blank()
+	var steel := Color(0.55, 0.58, 0.6)
+	_line(img, Vector2(24, 63), Vector2(31, 6), 2, steel)
+	_line(img, Vector2(40, 63), Vector2(33, 6), 2, steel)
+	for i in 5:
+		var y := 58 - i * 11
+		_line(img, Vector2(25 + i * 1.3, y), Vector2(39 - i * 1.3, y - 8), 1, steel)
+	_dot(img, 32, 6, 4.0, Color(0.3, 1.0, 0.5) if on else Color(0.9, 0.2, 0.15))
+	_outline(img, Color(0.08, 0.08, 0.1))
+	return ImageTexture.create_from_image(img)
+
+
+static func _dropship(frame: int) -> ImageTexture:
+	## The Gannet seen from below and in front.
+	var img := _blank()
+	var hull := Color(0.42, 0.47, 0.45)
+	_box(img, 14, 26, 50, 42, hull)
+	_box(img, 4, 22, 60, 26, hull.darkened(0.3))
+	_box(img, 22, 42, 42, 46, hull.darkened(0.2))
+	_box(img, 26, 30, 38, 35, Color(0.5, 0.85, 1.0))
+	# Engines with flame
+	for x in [8, 52]:
+		_box(img, x - 4, 18, x + 4, 30, Color(0.25, 0.27, 0.28))
+		var fl := 8 if frame == 0 else 12
+		_box(img, x - 3, 30, x + 3, 30 + fl, Color(1.0, 0.65, 0.2))
+		_box(img, x - 1, 30, x + 1, 30 + fl - 2, Color(1.0, 0.95, 0.7))
+	_box(img, 30, 46, 34, 52, Color(0.2, 0.2, 0.2))
+	_outline(img, Color(0.05, 0.06, 0.06))
 	return ImageTexture.create_from_image(img)
 
 

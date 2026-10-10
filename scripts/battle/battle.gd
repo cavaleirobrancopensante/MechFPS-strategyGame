@@ -10,6 +10,7 @@ extends Node2D
 const LevelMap = preload("res://scripts/battle/level_map.gd")
 const AlienArt = preload("res://scripts/battle/alien_art.gd")
 const MechDiagram = preload("res://scripts/mech_diagram.gd")
+const Story = preload("res://scripts/story.gd")
 
 # --- View ---------------------------------------------------------------------
 const COLUMNS := 200          ## rays per frame; lower = faster on old phones
@@ -24,6 +25,7 @@ const FACE_COLORS := {
 	LevelMap.METAL: Color(0.42, 0.48, 0.56),
 	LevelMap.ORGANIC: Color(0.55, 0.2, 0.42),
 	LevelMap.PLATFORM: Color(0.5, 0.5, 0.53),
+	LevelMap.RUBBLE: Color(0.42, 0.37, 0.33),
 }
 const GROUND_TOP := Color(0.27, 0.15, 0.13)
 const PLATFORM_TOP := Color(0.36, 0.36, 0.39)
@@ -32,13 +34,16 @@ const PLATFORM_TOP := Color(0.36, 0.36, 0.39)
 const MECH_R := LevelMap.MECH_R
 const PILOT_R := 0.15
 const PILOT_EYE := 0.55
-const PILOT_MAX_HP := 40.0
 const PILOT_WALK := 2.2
 const PILOT_RUN := 3.8
 const PILOT_STEP := 0.55
 const BOARD_DIST := 1.6
 const CLIMB_TIME := 1.3
-const CARBINE_DMG := 8.0
+const DROP_TIME := 2.6
+const LIFT_TIME := 2.2
+const PICKUP_TIME := 8.0
+const LZ_RADIUS := 2.5
+const BEACON_TIME := 3.0
 const KEY_TURN_SPEED := 2.4
 const LOOK_SENS := 0.0065
 const PITCH_SENS := 0.9       ## screen pixels of look per pixel of finger drag
@@ -53,6 +58,7 @@ const ALIEN_TYPES := {
 	"spitter": {"hp": 45.0, "speed": 1.5, "dmg": 9.0, "range": 7.0, "cd": 2.2, "w": 0.85, "h": 1.15, "r": 0.25},
 	"brute": {"hp": 170.0, "speed": 1.15, "dmg": 18.0, "range": 1.25, "cd": 1.5, "w": 1.6, "h": 1.8, "r": 0.4},
 	"hive": {"hp": 300.0, "speed": 0.0, "dmg": 0.0, "range": 0.0, "cd": 5.0, "w": 2.0, "h": 1.7, "r": 0.5},
+	"mother": {"hp": 1500.0, "speed": 0.0, "dmg": 0.0, "range": 0.0, "cd": 3.0, "w": 3.8, "h": 3.2, "r": 0.9},
 }
 
 enum State { PLAYING, WON, LOST, RETREATED }
@@ -74,7 +80,8 @@ var on_foot := false
 var mech_pos := Vector2()     ## where the empty mech is parked
 var mech_angle := 0.0
 var mech_fz := 0.0
-var pilot_hp := PILOT_MAX_HP
+var pilot_hp := 40.0
+var pilot_max_hp := 40.0
 var pilot_down := false
 var climb_t := 0.0            ## > 0 while climbing out of or into the mech
 var climb_out := true
@@ -82,8 +89,36 @@ var climb_from := {}
 var climb_to := {}
 var caches: Array = []
 var caches_found := 0
-var bonus_credits := 0
-var bonus_salvage := 0
+
+# --- Mission ------------------------------------------------------------------
+var op := {}
+var mtype := "destroy"
+var diff := 1
+var phase := "drop"           ## drop → fight → extract → lift
+var drop_t := DROP_TIME
+var lift_t := 0.0
+var pickup_t := 0.0
+var objective_done := false
+var lz := Vector2()
+var survivors_list: Array = []
+var rescued := 0
+var rescue_total := 0
+var cargo: Array = []
+var items_got := 0
+var beacons: Array = []
+var beacons_done := 0
+var waves_total := 0
+var wave := 0
+var wave_timer := 0.0
+var wave_pause := 3.0
+var breaches: Array = []
+var loot := {"scrap": 0, "circuits": 0, "biomass": 0, "shells": 0, "rockets": 0, "rounds": 0}
+var ammo_left := {"shells": 0, "rockets": 0, "rounds": 0}
+var radio_who := ""
+var radio_text := ""
+var radio_t := 0.0
+var no_ammo_cd := 0.0
+var aborted := false
 var running := false
 var told_foot := false
 var parts := {}
@@ -119,7 +154,6 @@ var kills := 0
 var brutes := 0
 var hives_total := 0
 var hives_destroyed := 0
-var mission_no := 1
 
 var move_touch := -1
 var move_origin := Vector2()
@@ -139,13 +173,24 @@ var cracks: Array = []
 
 func _ready() -> void:
 	font = ThemeDB.fallback_font
-	mission_no = GameState.mission
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	rng.seed = GameState.mission_seed() + 99
+	op = GameState.current_mission
+	if op.is_empty():
+		# Started the battle scene directly (testing): make a quick mission.
+		op = {"title": "Test Drop", "zone": "Test Range", "type": "destroy", "hives": 1, "diff": 1, "seed": 7}
+	mtype = op.get("type", "destroy")
+	diff = int(op.get("diff", 1))
+	rng.seed = int(op.get("seed", 7)) + 99
 	tex = AlienArt.build_all()
+	tex["mother"] = tex["hive"]
+	pilot_max_hp = GameState.pilot_max_hp()
+	pilot_hp = pilot_max_hp
+	for a in GameState.AMMO:
+		ammo_left[a] = int(GameState.loadout.get(a, GameState.ammo_caps()[a] if GameState.current_mission.is_empty() else 0))
 
 	map = LevelMap.new()
-	map.generate(GameState.mission_seed(), GameState.mission_hive_count())
+	var nest_count: int = op.get("hives", 0) + (1 if mtype == "boss" else 0)
+	map.generate(int(op.get("seed", 7)), nest_count)
 	hives_total = map.hive_cells.size()
 	pos = map.start
 	floor_z = map.height_at(pos)
@@ -160,31 +205,32 @@ func _ready() -> void:
 	for p in GameState.PARTS:
 		parts[p] = GameState.part_hp[p]
 
-	for hc in map.hive_cells:
-		_spawn("hive", Vector2(hc) + Vector2(0.5, 0.5), false)
+	for i in map.hive_cells.size():
+		var hc: Vector2i = map.hive_cells[i]
+		_spawn("mother" if mtype == "boss" and i == 0 else "hive", Vector2(hc) + Vector2(0.5, 0.5), false)
 	var nests := map.nest_cells.duplicate()
 	for i in range(nests.size() - 1, 0, -1):
 		var j := rng.randi_range(0, i)
 		var tmp = nests[i]
 		nests[i] = nests[j]
 		nests[j] = tmp
-	var count := mini(3 + GameState.mission * 2, nests.size())
+	var count := mini(3 + diff * 2, nests.size())
 	for i in count:
 		var c: Vector2i = nests[i]
 		_spawn(_pick_kind(), Vector2(c) + Vector2(rng.randf_range(0.3, 0.7), rng.randf_range(0.3, 0.7)), false)
 	for sp in map.prop_spots:
 		props.append({"pos": sp, "z": map.height_at(sp), "kind": "crystal" if rng.randf() < 0.3 else "rock"})
 
-	for sp in map.cache_spots:
-		caches.append({"pos": sp, "z": map.height_at(sp), "taken": false, "anim": rng.randf() * 3.0})
+	_setup_mission()
 
 	_build_backdrop()
 	col_events.resize(COLUMNS)
 	for c in COLUMNS:
 		col_events[c] = PackedFloat32Array()
 	_update_flow()
-	_show_msg("MISSION %d — DESTROY %d HIVE%s" % [GameState.mission, hives_total, "" if hives_total == 1 else "S"], 3.5)
-	Sfx.play("step")
+	_show_msg(String(op.get("title", "")).to_upper() + " — " + GameState.objective_text(op).to_upper(), 4.0)
+	_radio("drop")
+	Sfx.play("rocket", -4.0, 0.0, 0.6)
 
 
 func _build_backdrop() -> void:
@@ -209,7 +255,7 @@ func _build_backdrop() -> void:
 
 
 func _pick_kind() -> String:
-	var m := GameState.mission
+	var m := diff
 	var r := rng.randf()
 	if m >= 2 and r < 0.06 + 0.03 * m:
 		return "brute"
@@ -220,10 +266,10 @@ func _pick_kind() -> String:
 
 func _spawn(kind: String, p: Vector2, awake: bool) -> Dictionary:
 	var st: Dictionary = ALIEN_TYPES[kind]
-	var hp: float = st["hp"] * (1.0 + 0.08 * (GameState.mission - 1))
+	var hp: float = st["hp"] * (1.0 + 0.08 * (diff - 1))
 	var a := {
 		"kind": kind, "pos": p, "fz": map.height_at(p), "hp": hp, "max": hp, "awake": awake,
-		"cd": rng.randf_range(0.5, 2.0) if kind == "hive" else 0.5, "anim": rng.randf() * 10.0,
+		"cd": rng.randf_range(0.5, 2.0) if kind == "hive" or kind == "mother" else 0.5, "anim": rng.randf() * 10.0,
 		"flash": 0.0, "dead": false, "death_t": 0.0, "lunge": 0.0, "moving": false,
 		"seed": rng.randf() * TAU, "st": st,
 	}
@@ -241,12 +287,20 @@ func _process(delta: float) -> void:
 	var vh := get_viewport_rect().size.y
 	pitch = clampf(pitch, -vh * PITCH_LIMIT, vh * PITCH_LIMIT)
 	horizon_y = vh * 0.5 + pitch + sin(bob_t * 2.0) * (11.0 if on_foot else 7.0) * bob_amount
+	radio_t -= delta
+	no_ammo_cd -= delta
 	if state == State.PLAYING:
-		if climb_t > 0.0:
+		if phase == "drop":
+			_update_drop(delta)
+		elif phase == "lift":
+			_update_lift(delta)
+		elif climb_t > 0.0:
 			_update_climb(delta)
 		else:
 			_update_player(delta)
 			_update_weapons(delta)
+		if phase != "drop" and phase != "lift":
+			_update_mission(delta)
 		flow_timer -= delta
 		if flow_timer <= 0.0:
 			_update_flow()
@@ -312,8 +366,7 @@ func _update_player(delta: float) -> void:
 		shake = maxf(shake, 12.0)
 		Sfx.play("step", -1.0)
 	eye_z = floor_z + eye_h
-	if on_foot:
-		_check_caches()
+	_check_caches()
 
 	var moving := inp.length()
 	bob_amount = lerpf(bob_amount, moving, minf(1.0, delta * 6.0))
@@ -359,6 +412,11 @@ func _fire_cannon() -> void:
 		fire_cd = 0.4
 		_show_msg("BOTH ARMS DESTROYED — USE ROCKETS", 1.0)
 		return
+	if ammo_left["shells"] <= 0:
+		_out_of_ammo()
+		fire_cd = 0.3
+		return
+	ammo_left["shells"] -= 1
 	var g: int = next_gun if guns.has(next_gun) else guns[0]
 	next_gun = 1 - g
 	fire_cd = 0.11 if guns.size() == 2 else 0.17
@@ -371,12 +429,17 @@ func _fire_cannon() -> void:
 
 
 func _fire_carbine() -> void:
+	if ammo_left["rounds"] <= 0:
+		_out_of_ammo()
+		fire_cd = 0.3
+		return
+	ammo_left["rounds"] -= 1
 	fire_cd = 0.16
 	muzzle[0] = 0.05
 	recoil[0] = 1.0
 	shake = maxf(shake, 0.8)
 	Sfx.play("gun", -9.0, 0.05, 1.7)
-	_shoot(Vector2(rng.randf_range(-4.0, 4.0), rng.randf_range(-4.0, 4.0)), CARBINE_DMG, 2)
+	_shoot(Vector2(rng.randf_range(-4.0, 4.0), rng.randf_range(-4.0, 4.0)), GameState.carbine_damage(), 2)
 
 
 func _shoot(spread: Vector2, damage: float, g: int) -> void:
@@ -404,8 +467,13 @@ func _shoot(spread: Vector2, damage: float, g: int) -> void:
 
 
 func _fire_rocket() -> void:
-	if rocket_cd > 0.0 or state != State.PLAYING or on_foot or climb_t > 0.0:
+	if rocket_cd > 0.0 or state != State.PLAYING or on_foot or climb_t > 0.0 or phase == "drop" or phase == "lift":
 		return
+	if ammo_left["rockets"] <= 0:
+		_out_of_ammo()
+		rocket_cd = 0.5
+		return
+	ammo_left["rockets"] -= 1
 	rocket_cd = GameState.rocket_cooldown()
 	var dir := Vector2.from_angle(angle)
 	# Climb/dive rate matching the crosshair line: aiming below the horizon dives.
@@ -535,8 +603,9 @@ func _damage_alien(a: Dictionary, amount: float) -> void:
 	a["dead"] = true
 	a["death_t"] = 0.0
 	var st: Dictionary = a["st"]
-	if a["kind"] == "hive":
+	if _is_nest(a):
 		hives_destroyed += 1
+		loot["biomass"] += 40 if a["kind"] == "mother" else 10
 		for i in 5:
 			var off := Vector2(rng.randf_range(-0.6, 0.6), rng.randf_range(-0.6, 0.6))
 			explosions.append({"pos": a["pos"] + off, "z": a["fz"] + rng.randf_range(0.3, 1.4), "t": -i * 0.08, "dur": 0.9, "size": 1.6, "col": Color(1.0, 0.45, 0.2)})
@@ -544,9 +613,11 @@ func _damage_alien(a: Dictionary, amount: float) -> void:
 		Sfx.play("screech", -2.0, 0.3)
 		shake = maxf(shake, 14.0)
 		var left := hives_total - hives_destroyed
-		_show_msg("HIVE DESTROYED" + ("" if left <= 0 else " — %d LEFT" % left), 2.5)
+		_show_msg(("BROOD MOTHER KILLED" if a["kind"] == "mother" else "HIVE DESTROYED") + ("" if left <= 0 or mtype == "destroy" or mtype == "boss" else " — %d LEFT" % left), 2.5)
+		_radio("hive")
 	else:
 		kills += 1
+		loot["biomass"] += 4 if a["kind"] == "brute" else 1
 		if a["kind"] == "brute":
 			brutes += 1
 		explosions.append({"pos": a["pos"], "z": a["fz"] + st["h"] * 0.5, "t": 0.0, "dur": 0.45, "size": st["w"] * 0.9, "col": Color(0.5, 0.95, 0.2)})
@@ -554,7 +625,7 @@ func _damage_alien(a: Dictionary, amount: float) -> void:
 
 
 func _damage_player(amount: float, src: Vector2) -> void:
-	if state != State.PLAYING:
+	if state != State.PLAYING or phase == "drop" or phase == "lift":
 		return
 	var rel := wrapf((src - pos).angle() - angle, -PI, PI)
 	if on_foot:
@@ -582,6 +653,9 @@ func _damage_player(amount: float, src: Vector2) -> void:
 		part = "torso"
 	var was_alive: bool = parts[part] > 0.0
 	parts[part] = maxf(0.0, parts[part] - amount)
+	if part == "torso" and parts["torso"] / GameState.max_hp("torso") < 0.3 and not get_meta("warned_armor", false):
+		set_meta("warned_armor", true)
+		_radio("low_armor")
 	hit_flash = 0.25
 	shake = maxf(shake, 9.0)
 	dmg_indicators.append({"rel": rel, "t": 0.9})
@@ -636,10 +710,10 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 	var to_p: Vector2 = pos - a["pos"]
 	var dist := to_p.length()
 	var st: Dictionary = a["st"]
-	var dmg_mul := 1.0 + 0.06 * (GameState.mission - 1)
+	var dmg_mul := 1.0 + 0.06 * (diff - 1)
 	var a_eye: float = a["fz"] + st["h"] * 0.8
 
-	if a["kind"] == "hive":
+	if _is_nest(a):
 		_update_hive(a, dist)
 		return
 	if not a["awake"]:
@@ -680,7 +754,7 @@ func _update_alien(a: Dictionary, delta: float) -> void:
 		move_dir = _flow_dir(a["pos"])
 
 	for b in aliens:
-		if b == a or b["dead"] or b["kind"] == "hive":
+		if b == a or b["dead"] or _is_nest(b):
 			continue
 		var off: Vector2 = a["pos"] - b["pos"]
 		var l := off.length()
@@ -704,12 +778,14 @@ func _update_hive(a: Dictionary, dist: float) -> void:
 		a["awake"] = true
 	if not a["awake"] or a["cd"] > 0.0:
 		return
-	a["cd"] = maxf(3.5, 7.5 - GameState.mission * 0.4)
+	a["cd"] = maxf(3.5, 7.5 - diff * 0.4)
+	if a["kind"] == "mother":
+		a["cd"] = maxf(2.0, 4.5 - diff * 0.2)
 	var alive := 0
 	for b in aliens:
-		if not b["dead"] and b["kind"] != "hive":
+		if not b["dead"] and not _is_nest(b):
 			alive += 1
-	if alive >= 8 + GameState.mission * 2:
+	if alive >= 8 + diff * 2:
 		return
 	var stand := map.height_at(a["pos"])
 	for attempt in 8:
@@ -761,6 +837,7 @@ func _update_projectiles(delta: float) -> void:
 
 
 func _explode_rocket(p: Vector2, z: float) -> void:
+	_blast_terrain(p, z)
 	explosions.append({"pos": p, "z": z, "t": 0.0, "dur": 0.75, "size": 1.4, "col": Color(1.0, 0.6, 0.2)})
 	for i in 3:
 		var off := Vector2(rng.randf_range(-0.5, 0.5), rng.randf_range(-0.5, 0.5))
@@ -812,12 +889,8 @@ func _check_end() -> void:
 		Sfx.play("boom", 2.0)
 		shake = 22.0
 		_finish()
-	elif hives_destroyed >= hives_total:
-		state = State.WON
-		# The hive mind is severed: every remaining alien collapses.
-		for a in aliens:
-			if not a["dead"]:
-				_damage_alien(a, 1e9)
+	elif aborted:
+		state = State.RETREATED
 		_finish()
 
 
@@ -826,19 +899,339 @@ func _finish() -> void:
 	move_touch = -1
 	look_touch = -1
 	move_vec = Vector2.ZERO
-	GameState.apply_battle_result({
+	GameState.apply_mission_result({
 		"won": state == State.WON,
-		"retreated": state == State.RETREATED,
-		"kills": kills,
-		"brutes": brutes,
-		"hives_destroyed": hives_destroyed,
-		"hives_total": hives_total,
-		"parts": parts.duplicate(),
-		"bonus_credits": bonus_credits,
-		"bonus_salvage": bonus_salvage,
-		"caches": caches_found,
+		"aborted": state == State.RETREATED,
 		"pilot_down": pilot_down,
+		"kills": kills,
+		"rescued": rescued,
+		"loot": loot.duplicate(),
+		"ammo_left": ammo_left.duplicate(),
+		"parts": parts.duplicate(),
 	})
+
+
+# --- Missions -------------------------------------------------------------------
+
+var _start_dist := PackedInt32Array()
+
+
+func _blast_terrain(p: Vector2, z: float) -> void:
+	## Rockets level ruins and walls, but they also kill anyone and wreck
+	## anything nearby. That's why some jobs are done on foot.
+	var result := map.blast(p, 1.3)
+	var destroyed: Array = result["destroyed"]
+	for c: Vector2i in destroyed:
+		var cp := Vector2(c) + Vector2(0.5, 0.5)
+		for k in 3:
+			var off := Vector2(rng.randf_range(-0.4, 0.4), rng.randf_range(-0.4, 0.4))
+			explosions.append({"pos": cp + off, "z": map.height_at(cp) + rng.randf_range(0.5, 2.0), "t": -k * 0.07, "dur": 1.1, "size": 0.9, "col": Color(0.55, 0.5, 0.45), "smoke": true})
+		props.append({"pos": cp + Vector2(rng.randf_range(-0.3, 0.3), rng.randf_range(-0.3, 0.3)), "z": map.height_at(cp), "kind": "rock"})
+	if not destroyed.is_empty():
+		Sfx.play("boom", -2.0, 0.1, 0.7)
+		shake = maxf(shake, 12.0)
+		_update_flow()
+	elif result["hard_hit"] and not get_meta("told_hard", false):
+		set_meta("told_hard", true)
+		_radio_line("mags", "That's a pre-war blast shelter. Rockets won't scratch it. You'll have to walk in.")
+	# Collateral damage.
+	for sv in survivors_list:
+		if not sv["freed"] and not sv.get("dead", false) and sv["pos"].distance_to(p) < 2.0:
+			sv["dead"] = true
+			sv["freed"] = true
+			sv["t"] = 99.0
+			if not sv.get("stray", false):
+				rescue_total -= 1
+			_show_msg("A SURVIVOR WAS KILLED IN THE BLAST", 3.0)
+			_radio("blast_civilian")
+	for it in cargo:
+		if not it["taken"] and it["pos"].distance_to(p) < 1.8:
+			it["taken"] = true
+			it["destroyed"] = true
+			_show_msg("CARGO DESTROYED IN THE BLAST", 2.5)
+			_radio("cargo_lost")
+	for c2 in caches:
+		if not c2["taken"] and c2["pos"].distance_to(p) < 1.6:
+			c2["taken"] = true
+	for b in beacons:
+		if not b["done"] and b["pos"].distance_to(p) < 1.4:
+			b["prog"] = 0.0
+
+
+func _radio_line(who: String, text: String) -> void:
+	radio_who = who
+	radio_text = text
+	radio_t = 5.0
+
+
+func _is_nest(a: Dictionary) -> bool:
+	return a["kind"] == "hive" or a["kind"] == "mother"
+
+
+func _radio(kind: String) -> void:
+	var lines: Array = Story.RADIO.get(kind, [])
+	if lines.is_empty():
+		return
+	var line: Array = lines[rng.randi_range(0, lines.size() - 1)]
+	radio_who = line[0]
+	radio_text = line[1]
+	radio_t = 5.0
+
+
+func _out_of_ammo() -> void:
+	Sfx.play("click", -2.0)
+	if no_ammo_cd <= 0.0:
+		no_ammo_cd = 6.0
+		_radio("no_ammo")
+		_show_msg("OUT OF AMMO", 1.5)
+
+
+func _pick_cells(count: int, need_mech: bool, min_dist: int, spacing: float, avoid: Array = []) -> Array:
+	## Random open cells, at least min_dist steps from the drop point and
+	## spaced apart from each other, hives and anything in `avoid`.
+	var cands: Array = []
+	for y in range(1, map.h - 1):
+		for x in range(1, map.w - 1):
+			var i := map.idx(x, y)
+			if map.kinds[i] != LevelMap.EMPTY or _start_dist[i] < min_dist:
+				continue
+			if need_mech and not map.mech_cells[i]:
+				continue
+			cands.append(Vector2(x + 0.5, y + 0.5))
+	for i in range(cands.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp = cands[i]
+		cands[i] = cands[j]
+		cands[j] = tmp
+	var out: Array = []
+	for c: Vector2 in cands:
+		if out.size() >= count:
+			break
+		var ok := true
+		for q: Vector2 in out + avoid:
+			if q.distance_to(c) < spacing:
+				ok = false
+				break
+		for hc in map.hive_cells:
+			if (Vector2(hc) + Vector2(0.5, 0.5)).distance_to(c) < 3.0:
+				ok = false
+		if ok:
+			out.append(c)
+	return out
+
+
+func _setup_mission() -> void:
+	_start_dist = map.distance_field(Vector2i(int(map.start.x), int(map.start.y)), true)
+	var nooks: Array = map.cache_spots.duplicate()
+	match mtype:
+		"rescue":
+			rescue_total = int(op.get("rescue", 3))
+			var spots: Array = nooks.slice(0, rescue_total)
+			nooks = nooks.slice(rescue_total)
+			spots.append_array(_pick_cells(rescue_total - spots.size(), false, 8, 5.0, spots))
+			for sp: Vector2 in spots:
+				survivors_list.append({"pos": sp, "z": map.height_at(sp), "freed": false, "anim": rng.randf() * 3.0, "t": 0.0})
+			rescue_total = survivors_list.size()
+		"retrieve":
+			var n := int(op.get("items", 4))
+			var k := mini(n / 2, nooks.size())
+			var spots2: Array = nooks.slice(0, k)
+			nooks = nooks.slice(k)
+			spots2.append_array(_pick_cells(n - k, true, 7, 5.0, spots2))
+			var kind := "item_" + String(op.get("item_kind", "supply"))
+			for sp: Vector2 in spots2:
+				cargo.append({"pos": sp, "z": map.height_at(sp), "taken": false, "kind": kind, "anim": rng.randf() * 3.0})
+		"scout":
+			for sp: Vector2 in _pick_cells(int(op.get("beacons", 3)), true, 8, 7.0):
+				beacons.append({"pos": sp, "z": map.height_at(sp), "prog": 0.0, "done": false})
+		"survive":
+			waves_total = int(op.get("waves", 3))
+			breaches = _pick_cells(4, true, 10, 6.0)
+			if breaches.is_empty():
+				breaches = [Vector2(map.w - 3.5, map.h - 3.5)]
+	# Sometimes someone is hiding even when nobody called for help.
+	if mtype != "rescue" and not nooks.is_empty() and rng.randf() < 0.6:
+		var sp2: Vector2 = nooks.pop_front()
+		survivors_list.append({"pos": sp2, "z": map.height_at(sp2), "freed": false, "anim": 0.0, "t": 0.0, "stray": true})
+	for sp3: Vector2 in nooks:
+		caches.append({"pos": sp3, "z": map.height_at(sp3), "taken": false, "anim": rng.randf() * 3.0})
+	# Landing zone for pickup.
+	if mtype == "survive":
+		lz = map.start
+	else:
+		var lzs := _pick_cells(1, true, 9, 0.0, cargo.map(func(it): return it["pos"]))
+		lz = lzs[0] if not lzs.is_empty() else map.start
+
+
+func _update_drop(delta: float) -> void:
+	drop_t -= delta
+	var k := clampf(drop_t / DROP_TIME, 0.0, 1.0)
+	floor_z = map.height_at(pos)
+	eye_z = floor_z + EYE + 26.0 * k * k
+	shake = maxf(shake, 2.5 * k)
+	if drop_t <= 0.0:
+		phase = "fight"
+		eye_z = floor_z + EYE
+		shake = 22.0
+		Sfx.play("boom", -3.0)
+		Sfx.play("step", 0.0)
+		for i in 8:
+			var p := pos + Vector2.from_angle(TAU * i / 8.0) * 1.3
+			explosions.append({"pos": p, "z": floor_z + 0.2, "t": 0.0, "dur": 0.9, "size": 0.7, "col": Color(0.55, 0.45, 0.38), "smoke": true})
+
+
+func _update_lift(delta: float) -> void:
+	lift_t += delta
+	var k := clampf(lift_t / LIFT_TIME, 0.0, 1.0)
+	eye_z = floor_z + EYE + 24.0 * k * k
+	shake = maxf(shake, 3.0 * (1.0 - k))
+	if lift_t >= LIFT_TIME:
+		state = State.WON
+		_finish()
+
+
+func _alive_hostiles() -> int:
+	var n := 0
+	for a in aliens:
+		if not a["dead"] and not _is_nest(a):
+			n += 1
+	return n
+
+
+func _update_waves(delta: float) -> void:
+	var alive := _alive_hostiles()
+	if wave_pause > 0.0:
+		wave_pause -= delta
+		if wave_pause <= 0.0 and wave < waves_total:
+			wave += 1
+			wave_timer = 0.0
+			_spawn_wave()
+		return
+	wave_timer += delta
+	if wave < waves_total and (alive <= 1 or wave_timer > 40.0):
+		wave_pause = 5.0
+		_show_msg("WAVE %d HELD — NEXT ONE COMING" % wave, 2.5)
+
+
+func _spawn_wave() -> void:
+	var n := 4 + 2 * wave + diff
+	for k in n:
+		var b: Vector2 = breaches[k % breaches.size()]
+		for attempt in 8:
+			var p := b + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(0.0, 1.6)
+			if not map.blocked(p, 0.3, map.height_at(b)):
+				_spawn(_pick_kind(), p, true)
+				explosions.append({"pos": p, "z": map.height_at(p) + 0.3, "t": -k * 0.05, "dur": 0.5, "size": 0.6, "col": Color(0.75, 0.3, 0.8)})
+				break
+	_show_msg("WAVE %d / %d" % [wave, waves_total], 2.0)
+	_radio("wave")
+	Sfx.play("screech", -2.0, 0.2)
+
+
+func _cargo_needed() -> int:
+	var n := 0
+	for it in cargo:
+		if not it.get("destroyed", false):
+			n += 1
+	return n
+
+
+func _objective_met() -> bool:
+	match mtype:
+		"destroy", "boss":
+			return hives_total > 0 and hives_destroyed >= hives_total
+		"rescue":
+			var n := 0
+			for sv in survivors_list:
+				if sv["freed"] and not sv.get("stray", false) and not sv.get("dead", false):
+					n += 1
+			return n >= rescue_total
+		"retrieve":
+			return items_got >= _cargo_needed()
+		"scout":
+			return beacons_done >= beacons.size()
+		"survive":
+			return wave >= waves_total and wave_pause <= 0.0 and (_alive_hostiles() == 0 or (_alive_hostiles() <= 1 and wave_timer > 20.0))
+	return false
+
+
+func _update_mission(delta: float) -> void:
+	for sv in survivors_list:
+		if sv["freed"]:
+			sv["t"] += delta
+	for b in beacons:
+		if b["done"]:
+			continue
+		if pos.distance_to(b["pos"]) < 1.7:
+			b["prog"] += delta
+			if b["prog"] >= BEACON_TIME:
+				b["done"] = true
+				beacons_done += 1
+				Sfx.play("pickup", 0.0, 0.0, 0.7)
+				_show_msg("RELAY ONLINE %d/%d" % [beacons_done, beacons.size()], 2.0)
+		else:
+			b["prog"] = maxf(0.0, b["prog"] - delta * 0.5)
+	if mtype == "survive":
+		_update_waves(delta)
+	if not objective_done and _objective_met():
+		objective_done = true
+		phase = "extract"
+		Sfx.play("pickup", 2.0, 0.0, 0.6)
+		_show_msg("OBJECTIVE COMPLETE — GET TO THE GREEN FLARE", 3.0)
+		_radio("objective_done")
+		if mtype == "destroy" or mtype == "boss":
+			# The song stops: every remaining alien collapses.
+			for a in aliens:
+				if not a["dead"]:
+					_damage_alien(a, 1e9)
+	if objective_done and phase == "extract":
+		var in_lz := pos.distance_to(lz) < LZ_RADIUS
+		if in_lz and not on_foot and climb_t <= 0.0:
+			if pickup_t == 0.0:
+				_radio("extract_inbound")
+				Sfx.play("rocket", -6.0, 0.0, 0.5)
+			pickup_t += delta
+			if pickup_t >= PICKUP_TIME:
+				phase = "lift"
+				lift_t = 0.0
+				_radio("extracted")
+				Sfx.play("rocket", 0.0, 0.0, 0.6)
+		elif in_lz and on_foot and msg_t < 0.0:
+			_show_msg("CLIMB BACK INTO BRIGID — THE GANNET LIFTS THE WALKER", 2.0)
+
+
+func _objective_string() -> String:
+	if phase == "drop":
+		return "DROPPING INTO %s" % String(op.get("zone", "")).to_upper()
+	if phase == "lift":
+		return "EXTRACTING — GOING HOME"
+	if objective_done:
+		if pickup_t > 0.0:
+			return "HOLD THE LZ — GANNET LANDING IN %ds" % int(ceil(PICKUP_TIME - pickup_t))
+		return "EXTRACT: GET BRIGID TO THE GREEN FLARE"
+	match mtype:
+		"destroy":
+			return "DESTROY HIVES %d/%d" % [hives_destroyed, hives_total]
+		"boss":
+			return "KILL THE BROOD MOTHER (%d/%d NESTS DOWN)" % [hives_destroyed, hives_total]
+		"rescue":
+			var n := 0
+			for sv in survivors_list:
+				if sv["freed"] and not sv.get("stray", false) and not sv.get("dead", false):
+					n += 1
+			return "RESCUE SURVIVORS %d/%d" % [n, rescue_total]
+		"retrieve":
+			return "RECOVER CARGO %d/%d" % [items_got, _cargo_needed()]
+		"scout":
+			for b in beacons:
+				if not b["done"] and b["prog"] > 0.0:
+					return "ACTIVATING RELAY... %d%%" % int(b["prog"] / BEACON_TIME * 100.0)
+			return "ACTIVATE RELAYS %d/%d" % [beacons_done, beacons.size()]
+		"survive":
+			if wave_pause > 0.0 and wave < waves_total:
+				return "WAVE %d/%d IN %ds" % [wave + 1, waves_total, int(ceil(wave_pause))]
+			return "SURVIVE WAVE %d/%d — %d HOSTILES" % [wave, waves_total, _alive_hostiles()]
+	return ""
 
 
 # --- Climbing out of and into the mech ----------------------------------------
@@ -848,16 +1241,44 @@ func _parked_mech_blocks(p: Vector2, r: float) -> bool:
 
 
 func _check_caches() -> void:
+	## Salvage caches, survivors and mission items are picked up by touch.
+	var reach := body_r + 0.45
 	for c in caches:
-		if c["taken"]:
+		if c["taken"] or pos.distance_to(c["pos"]) > reach or absf(floor_z - c["z"]) > 0.7:
 			continue
-		if pos.distance_to(c["pos"]) < 0.55 and absf(floor_z - c["z"]) < 0.6:
-			c["taken"] = true
-			caches_found += 1
-			bonus_credits += 40
-			bonus_salvage += 1
-			Sfx.play("pickup", -2.0, 0.0)
-			_show_msg("SALVAGE CACHE  +40 CR  +1 SALVAGE", 2.0)
+		c["taken"] = true
+		caches_found += 1
+		Sfx.play("pickup", -2.0, 0.0)
+		var roll := rng.randf()
+		if roll < 0.4:
+			var n := rng.randi_range(6, 12) + diff
+			loot["scrap"] += n
+			_show_msg("SALVAGE CACHE  +%d SCRAP" % n, 2.0)
+		elif roll < 0.6:
+			var n2 := rng.randi_range(2, 4)
+			loot["circuits"] += n2
+			_show_msg("ELECTRONICS  +%d CIRCUITS" % n2, 2.0)
+		else:
+			var kind: String = ["shells", "rockets", "rounds"][rng.randi_range(0, 2)]
+			var amount: int = {"shells": rng.randi_range(80, 150), "rockets": 2, "rounds": rng.randi_range(30, 50)}[kind]
+			ammo_left[kind] += amount
+			_show_msg("AMMO CRATE  +%d %s" % [amount, GameState.AMMO_NAMES[kind].to_upper()], 2.0)
+	for sv in survivors_list:
+		if sv["freed"] or pos.distance_to(sv["pos"]) > reach + 0.2 or absf(floor_z - sv["z"]) > 0.8:
+			continue
+		sv["freed"] = true
+		sv["t"] = 0.0
+		rescued += 1
+		Sfx.play("pickup", 0.0, 0.0, 0.8)
+		_show_msg("SURVIVOR FOUND — %s" % ("THEY'RE HEADING FOR THE DRONE" if not sv.get("stray", false) else "ONE MORE FOR THE ROCK"), 2.5)
+		_radio("rescue")
+	for it in cargo:
+		if it["taken"] or pos.distance_to(it["pos"]) > reach + 0.2 or absf(floor_z - it["z"]) > 0.8:
+			continue
+		it["taken"] = true
+		items_got += 1
+		Sfx.play("pickup", 0.0, 0.0, 1.2)
+		_show_msg("RECOVERED %d/%d" % [items_got, _cargo_needed()], 2.0)
 
 
 func _toggle_mech() -> void:
@@ -957,7 +1378,8 @@ func _update_climb(delta: float) -> void:
 		Sfx.play("step", -8.0, 0.1, 1.6)
 		if not told_foot:
 			told_foot = true
-			_show_msg("ON FOOT — FIND CACHES WHERE THE MECH CAN'T FIT", 3.0)
+			_show_msg("ON FOOT — SQUEEZE WHERE BRIGID CAN'T FIT", 3.0)
+			_radio("foot")
 	else:
 		on_foot = false
 		body_r = MECH_R
@@ -990,7 +1412,7 @@ func _show_msg(text: String, dur: float) -> void:
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if state != State.PLAYING and end_time > 1.0 and event.keycode in [KEY_SPACE, KEY_ENTER, KEY_ESCAPE]:
-			get_tree().change_scene_to_file("res://scenes/hangar.tscn")
+			get_tree().change_scene_to_file("res://scenes/base.tscn")
 		elif state == State.PLAYING and event.keycode == KEY_X:
 			_toggle_mech()
 		return
@@ -1002,20 +1424,19 @@ func _input(event: InputEvent) -> void:
 				return
 			if state != State.PLAYING:
 				if end_time > 1.2:
-					get_tree().change_scene_to_file("res://scenes/hangar.tscn")
+					get_tree().change_scene_to_file("res://scenes/base.tscn")
 				return
 			if _retreat_rect().has_point(p):
 				if retreat_armed > 0.0:
-					state = State.RETREATED
-					_finish()
+					aborted = true
 				else:
 					retreat_armed = 2.5
 					Sfx.play("click")
 				return
-			if _mech_button_rect(s).has_point(p):
+			if _mech_button_rect(s).has_point(p) and phase != "drop" and phase != "lift":
 				_toggle_mech()
 				return
-			if climb_t > 0.0:
+			if climb_t > 0.0 or phase == "drop" or phase == "lift":
 				return
 			if p.distance_to(_fire_center(s)) < FIRE_R * 1.2:
 				fire_touch = event.index
@@ -1226,7 +1647,7 @@ func _draw_world(w: float, h: float, horizon: float, proj_scale: float) -> void:
 
 			# Stop when out of range, or when nothing farther can rise above
 			# what's already covered.
-			if d_out > MAX_VIEW or clip <= 0.0 or clip <= horizon - cut / d_out:
+			if d_out > MAX_VIEW or clip <= 0.0 or (cut > 0.0 and clip <= horizon - cut / d_out) or (cut <= 0.0 and clip <= horizon):
 				break
 
 			if side == 0:
@@ -1261,6 +1682,8 @@ func _top_color(height: float, kind: int, d: float) -> Color:
 	match kind:
 		LevelMap.PLATFORM:
 			col = PLATFORM_TOP
+		LevelMap.RUBBLE:
+			col = Color(0.36, 0.31, 0.28)
 		LevelMap.EMPTY:
 			col = GROUND_TOP.lightened(clampf(height * 0.12, 0.0, 0.3)) if height >= 0.0 else GROUND_TOP.darkened(0.35 * minf(-height, 1.0))
 		_:
@@ -1355,6 +1778,31 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 		var pr := _project(cc["pos"])
 		if pr.y > 0.15 and pr.y < MAX_VIEW:
 			items.append([pr.y, 4, cc, pr.x])
+	for sv in survivors_list:
+		if sv["freed"] and sv["t"] > 1.2:
+			continue
+		var spos: Vector2 = sv["pos"]
+		if sv["freed"]:
+			spos += (lz - spos).normalized() * sv["t"] * 2.5
+		var pr := _project(spos)
+		if pr.y > 0.15 and pr.y < MAX_VIEW:
+			items.append([pr.y, 6, sv, pr.x])
+	for it in cargo:
+		if it["taken"]:
+			continue
+		var pr := _project(it["pos"])
+		if pr.y > 0.15 and pr.y < MAX_VIEW:
+			items.append([pr.y, 7, it, pr.x])
+	for b in beacons:
+		var pr := _project(b["pos"])
+		if pr.y > 0.15 and pr.y < MAX_VIEW:
+			items.append([pr.y, 8, b, pr.x])
+	if objective_done and phase == "extract":
+		var pr := _project(lz)
+		if pr.y > 0.15:
+			items.append([pr.y, 10, {}, pr.x])
+			if pickup_t > 0.0:
+				items.append([pr.y - 0.05, 9, {}, pr.x])
 	if not _in_cockpit_view():
 		var pr := _project(mech_pos)
 		if pr.y > 0.15 and pr.y < MAX_VIEW:
@@ -1392,7 +1840,7 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				if o["flash"] > 0.0:
 					mod = Color(2.0, 2.0, 2.0)
 				var rect := _billboard(frame, sx, ty, ww, hh, o["fz"], mod, horizon, proj_scale, col_w)
-				if not o["dead"] and (o["kind"] == "hive" or o["kind"] == "brute") and o["hp"] < o["max"] and rect.size.x > 6.0:
+				if not o["dead"] and (_is_nest(o) or o["kind"] == "brute") and o["hp"] < o["max"] and rect.size.x > 6.0:
 					var bar := Rect2(rect.position.x, rect.position.y - 10.0, rect.size.x, 5.0)
 					if bar.position.y < _clip_at(c, ty):
 						draw_rect(bar, Color(0, 0, 0, 0.6))
@@ -1423,6 +1871,42 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var cf: Array = tex["cache"]
 				var ct: Texture2D = cf[int(time * 3.0 + o["anim"]) % cf.size()]
 				_billboard(ct, sx, ty, 0.6, 0.6, o["z"], Color.WHITE.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+			6:
+				var sframes: Array = tex["survivor"]
+				var st2: Texture2D = sframes[int(time * 3.0 + o["anim"]) % 2]
+				var smod := Color.WHITE.lerp(FOG, fog * 0.6)
+				if o["freed"]:
+					smod.a = clampf(1.2 - o["t"], 0.0, 1.0)
+				var sz: float = map.height_at(o["pos"]) if not o["freed"] else o["z"]
+				_billboard(st2, sx, ty, 0.45, 0.8, sz, smod, horizon, proj_scale, col_w)
+			7:
+				var iframes: Array = tex[o["kind"]]
+				var itex: Texture2D = iframes[int(time * 3.0 + o["anim"]) % iframes.size()]
+				_billboard(itex, sx, ty, 0.55, 0.55, o["z"], Color.WHITE.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+			8:
+				var btex: Texture2D = tex["beacon_on" if o["done"] else "beacon_off"][0]
+				var brect := _billboard(btex, sx, ty, 0.9, 2.6, o["z"], Color.WHITE.lerp(FOG, fog * 0.7), horizon, proj_scale, col_w)
+				if not o["done"] and o["prog"] > 0.0 and brect.size.x > 4.0:
+					var pbar := Rect2(brect.position.x - 10, brect.position.y - 12, brect.size.x + 20, 6)
+					draw_rect(pbar, Color(0, 0, 0, 0.6))
+					draw_rect(Rect2(pbar.position, Vector2(pbar.size.x * o["prog"] / BEACON_TIME, pbar.size.y)), Color(0.3, 0.9, 1.0))
+			9:
+				# The Gannet coming down onto the landing zone.
+				var k9 := clampf(pickup_t / PICKUP_TIME, 0.0, 1.0)
+				var dz := map.height_at(lz) + lerpf(16.0, 2.8, 1.0 - pow(1.0 - k9, 3.0))
+				var dframes: Array = tex["dropship"]
+				_billboard(dframes[int(time * 12.0) % 2], sx, ty, 4.5, 4.5, dz, Color.WHITE.lerp(FOG, fog * 0.5), horizon, proj_scale, col_w)
+			10:
+				# Green flare and light beam over the landing zone.
+				var gz := map.height_at(lz)
+				var gy: float = horizon + (eye_z - gz) * proj_scale / ty
+				var bw := clampf(0.25 * proj_scale / ty, 2.0, 30.0)
+				var pulse := 0.6 + 0.4 * sin(time * 6.0)
+				var c10 := clampi(int(sx / col_w), 0, COLUMNS - 1)
+				var clip10 := _clip_at(c10, ty)
+				draw_rect(Rect2(sx - bw * 0.5, -40.0, bw, minf(gy, clip10) + 40.0), Color(0.4, 1.0, 0.5, 0.18 * pulse))
+				if gy < clip10:
+					draw_circle(Vector2(sx, gy), bw * 1.4, Color(0.5, 1.0, 0.6, 0.6 * pulse))
 			5:
 				var from_behind := (pos - mech_pos).dot(Vector2.from_angle(mech_angle)) < 0.0
 				var mt: Texture2D = tex["mech_back" if from_behind else "mech_front"][0]
@@ -1532,7 +2016,7 @@ func _draw_visor(w: float, h: float) -> void:
 	draw_line(Vector2(w * 0.25, h * 0.02), Vector2(w * 0.75, h * 0.02), Color(0.4, 1.0, 0.6, 0.25), 2.0)
 	if hit_flash > 0.0:
 		draw_rect(Rect2(-40, -40, w + 80, h + 80), Color(1, 0.1, 0.05, hit_flash * 0.8))
-	if pilot_hp < PILOT_MAX_HP * 0.35:
+	if pilot_hp < pilot_max_hp * 0.35:
 		var pulse := 0.15 + 0.12 * sin(time * 7.0)
 		draw_rect(Rect2(-40, -40, w + 80, 60), Color(1, 0, 0, pulse))
 		draw_rect(Rect2(-40, h - 20, w + 80, 60), Color(1, 0, 0, pulse))
@@ -1650,14 +2134,22 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	draw_circle(cc, 2.0, ch_col)
 
 	# Objective bar
-	var obj := "MISSION %d    HIVES %d/%d    KILLS %d    CACHES %d/%d" % [mission_no, hives_destroyed, hives_total, kills, caches_found, caches.size()]
-	_text(obj, Vector2(w * 0.5, h * 0.06 + 30.0), 20, hud)
+	_text(_objective_string(), Vector2(w * 0.5, h * 0.06 + 30.0), 20, Color(1.0, 0.9, 0.4) if objective_done else hud)
+	if radio_t > 0.0 and radio_who != "":
+		var who: Dictionary = Story.CAST[radio_who]
+		var line := "%s: %s" % [String(who["name"]).to_upper(), radio_text]
+		var tw := font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, 17).x
+		var ra := clampf(radio_t, 0.0, 1.0)
+		draw_rect(Rect2(w * 0.5 - tw * 0.5 - 10, h * 0.06 + 42.0, tw + 20, 28), Color(0, 0, 0, 0.55 * ra))
+		var wc: Color = who["color"]
+		wc.a = ra
+		_text(line, Vector2(w * 0.5, h * 0.06 + 62.0), 17, wc)
 
 	# Retreat button
 	var rr := _retreat_rect()
 	draw_rect(rr, Color(0.15, 0.03, 0.03, 0.85) if retreat_armed > 0.0 else Color(0.05, 0.06, 0.07, 0.8))
 	draw_rect(rr, Color(0.8, 0.3, 0.2), false, 2.0)
-	_text("TAP AGAIN" if retreat_armed > 0.0 else "RETREAT", rr.get_center() + Vector2(0, 7), 18, Color(1, 0.6, 0.5))
+	_text("TAP AGAIN" if retreat_armed > 0.0 else "ABORT", rr.get_center() + Vector2(0, 7), 18, Color(1, 0.6, 0.5))
 
 	# Mech status
 	var panel := Rect2(16, 72, 150, 150)
@@ -1670,11 +2162,11 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 	if on_foot:
 		_text("MECH PARKED", Vector2(panel.get_center().x, panel.end.y - 6.0), 14, Color(1.0, 0.85, 0.3))
 		var pb := Rect2(16, panel.end.y + 8.0, 150, 18)
-		var ratio := pilot_hp / PILOT_MAX_HP
+		var ratio := pilot_hp / pilot_max_hp
 		draw_rect(pb, Color(0, 0, 0, 0.6))
 		draw_rect(Rect2(pb.position, Vector2(pb.size.x * ratio, pb.size.y)), MechDiagram.part_color(ratio))
 		draw_rect(pb, hud, false, 1.0)
-		_text("PILOT %d/%d" % [int(ceil(pilot_hp)), int(PILOT_MAX_HP)], pb.get_center() + Vector2(0, 6), 14, Color.WHITE)
+		_text("PILOT %d/%d" % [int(ceil(pilot_hp)), int(pilot_max_hp)], pb.get_center() + Vector2(0, 6), 14, Color.WHITE)
 
 	_draw_minimap(w)
 
@@ -1702,20 +2194,20 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 
 	if on_foot:
 		var fy := h * 0.955
-		_text("CARBINE    " + ("RUNNING" if running else "PUSH STICK ALL THE WAY TO RUN"), Vector2(w * 0.5, fy), 17, hud)
+		_text("CARBINE  %d ROUNDS    %s" % [ammo_left["rounds"], "RUNNING" if running else "PUSH STICK ALL THE WAY TO RUN"], Vector2(w * 0.5, fy), 17, hud if ammo_left["rounds"] > 0 else Color(1, 0.3, 0.2))
 		_draw_hud_messages(w, h, cc)
 		return
 
 	# Weapon status on the console
 	var cy := h * 0.955
-	var gun_txt := "CANNON  L %s  R %s" % ["●" if parts["left_arm"] > 0.0 else "✕", "●" if parts["right_arm"] > 0.0 else "✕"]
-	_text(gun_txt, Vector2(w * 0.5 - 130, cy), 18, hud)
+	var gun_txt := "SHELLS %d  L %s R %s" % [ammo_left["shells"], "●" if parts["left_arm"] > 0.0 else "✕", "●" if parts["right_arm"] > 0.0 else "✕"]
+	_text(gun_txt, Vector2(w * 0.5 - 130, cy), 18, hud if ammo_left["shells"] > 0 else Color(1, 0.3, 0.2))
 	var bar := Rect2(w * 0.5 + 10, cy - 15, 180, 16)
 	var rk_ready := clampf(1.0 - rocket_cd / GameState.rocket_cooldown(), 0.0, 1.0)
 	draw_rect(bar, Color(0, 0, 0, 0.6))
 	draw_rect(Rect2(bar.position, Vector2(bar.size.x * rk_ready, bar.size.y)), Color(1.0, 0.6, 0.15) if rk_ready >= 1.0 else Color(0.5, 0.35, 0.15))
 	draw_rect(bar, hud, false, 1.0)
-	_text("ROCKETS READY" if rk_ready >= 1.0 else "RELOADING", bar.get_center() + Vector2(0, 30), 14, hud)
+	_text(("%d ROCKETS" % ammo_left["rockets"]) + (" READY" if rk_ready >= 1.0 else " · RELOADING"), bar.get_center() + Vector2(0, 30), 14, hud if ammo_left["rockets"] > 0 else Color(1, 0.3, 0.2))
 
 	_draw_hud_messages(w, h, cc)
 
@@ -1727,7 +2219,7 @@ func _draw_hud_messages(w: float, h: float, cc: Vector2) -> void:
 		_text(msg, Vector2(w * 0.5, h * 0.24), 30, Color(1.0, 0.85, 0.3, a))
 	if not on_foot and parts["torso"] / GameState.max_hp("torso") < 0.3 and state == State.PLAYING and fmod(time, 0.8) < 0.5:
 		_text("HULL CRITICAL", Vector2(w * 0.5, h * 0.15), 26, Color(1, 0.2, 0.15))
-	if on_foot and pilot_hp < PILOT_MAX_HP * 0.35 and state == State.PLAYING and fmod(time, 0.8) < 0.5:
+	if on_foot and pilot_hp < pilot_max_hp * 0.35 and state == State.PLAYING and fmod(time, 0.8) < 0.5:
 		_text("PILOT BADLY HURT — GET BACK IN THE MECH", Vector2(w * 0.5, h * 0.15), 24, Color(1, 0.2, 0.15))
 
 	# Hit direction markers
@@ -1766,6 +2258,8 @@ func _draw_minimap(w: float) -> void:
 					c = Color(0.55, 0.16, 0.42)
 				LevelMap.PLATFORM:
 					c = Color(0.45, 0.5, 0.6, 0.55 + clampf(hh * 0.15, 0.0, 0.4))
+				LevelMap.RUBBLE:
+					c = Color(0.5, 0.42, 0.3, 0.6)
 				_:
 					if hh > 0.01:
 						c = Color(0.3, 0.5, 0.3, clampf(hh * 0.4, 0.1, 0.35))
@@ -1783,11 +2277,49 @@ func _draw_minimap(w: float) -> void:
 		if absf(rel.x) > radius - 0.3 or absf(rel.y) > radius - 0.3:
 			continue
 		var p := center + rel * cs
-		if a["kind"] == "hive":
+		if _is_nest(a):
 			var pulse := 6.0 + 2.0 * sin(time * 4.0)
 			draw_rect(Rect2(p - Vector2(pulse, pulse), Vector2(pulse, pulse) * 2.0), Color(0.9, 0.3, 1.0))
 		else:
 			draw_circle(p, 3.5 if a["kind"] != "brute" else 5.5, Color(1.0, 0.25, 0.2) if a["awake"] else Color(0.8, 0.55, 0.2))
+	var mpulse := 0.5 + 0.5 * sin(time * 5.0)
+	for sv in survivors_list:
+		if sv["freed"]:
+			continue
+		var srel: Vector2 = sv["pos"] - pos
+		if absf(srel.x) < radius - 0.3 and absf(srel.y) < radius - 0.3:
+			draw_circle(center + srel * cs, 4.0, Color(1, 1, 1, 0.6 + 0.4 * mpulse))
+	for it in cargo:
+		if it["taken"]:
+			continue
+		var irel: Vector2 = it["pos"] - pos
+		if absf(irel.x) < radius - 0.3 and absf(irel.y) < radius - 0.3:
+			draw_rect(Rect2(center + irel * cs - Vector2(4, 4), Vector2(8, 8)), Color(0.4, 0.9, 1.0))
+		else:
+			var iv := irel.normalized()
+			draw_circle(center + iv * (mm.size.x * 0.5 - 8.0), 3.5, Color(0.4, 0.9, 1.0))
+	for b in beacons:
+		var brel: Vector2 = b["pos"] - pos
+		var bc := Color(0.3, 1.0, 0.5) if b["done"] else Color(0.3, 0.8, 1.0)
+		if absf(brel.x) < radius - 0.3 and absf(brel.y) < radius - 0.3:
+			draw_arc(center + brel * cs, 6.0, 0, TAU, 12, bc, 2.0)
+		elif not b["done"]:
+			var bv := brel.normalized()
+			draw_circle(center + bv * (mm.size.x * 0.5 - 8.0), 3.5, bc)
+	for bp: Vector2 in breaches:
+		var prel := bp - pos
+		if absf(prel.x) < radius - 0.3 and absf(prel.y) < radius - 0.3:
+			var q := center + prel * cs
+			draw_line(q - Vector2(4, 4), q + Vector2(4, 4), Color(1, 0.3, 0.3), 2.0)
+			draw_line(q - Vector2(4, -4), q + Vector2(4, -4), Color(1, 0.3, 0.3), 2.0)
+	var lrel := lz - pos
+	var lcol := Color(0.4, 1.0, 0.5, 0.9 if objective_done else 0.35)
+	if absf(lrel.x) < radius - 0.3 and absf(lrel.y) < radius - 0.3:
+		draw_arc(center + lrel * cs, LZ_RADIUS * cs * (0.8 + 0.2 * mpulse if objective_done else 1.0), 0, TAU, 24, lcol, 2.0)
+	elif objective_done:
+		var lv := lrel.normalized()
+		var le := center + lv * (mm.size.x * 0.5 - 10.0)
+		draw_circle(le, 6.0, lcol)
 	for cc in caches:
 		if cc["taken"]:
 			continue
@@ -1806,7 +2338,7 @@ func _draw_minimap(w: float) -> void:
 			draw_circle(me, 6.0, Color(0.4, 1.0, 0.6))
 	# Off-screen hive arrows so the player always knows where to go.
 	for a in aliens:
-		if a["dead"] or a["kind"] != "hive":
+		if a["dead"] or not _is_nest(a):
 			continue
 		var rel2: Vector2 = a["pos"] - pos
 		if absf(rel2.x) <= radius - 0.3 and absf(rel2.y) <= radius - 0.3:
@@ -1822,6 +2354,7 @@ func _draw_minimap(w: float) -> void:
 	draw_rect(mm, Color(0.2, 0.5, 0.3), false, 2.0)
 	# Altitude readout under the minimap.
 	_text("ELEV %+.1f" % floor_z, Vector2(mm.get_center().x, mm.end.y + 20.0), 15, Color(0.4, 1.0, 0.6, 0.8))
+	_text("SCRAP %d · CIRC %d · BIO %d" % [loot["scrap"], loot["circuits"], loot["biomass"]], Vector2(mm.get_center().x, mm.end.y + 102.0), 14, Color(0.9, 0.85, 0.6, 0.9))
 
 
 func _draw_touch_controls(w: float, h: float) -> void:
@@ -1849,28 +2382,28 @@ func _draw_touch_controls(w: float, h: float) -> void:
 
 func _draw_end_screen(w: float, h: float) -> void:
 	var k := clampf(end_time / 0.8, 0.0, 1.0)
-	draw_rect(Rect2(0, 0, w, h), Color(0, 0, 0, 0.6 * k))
-	var title := "HIVES DESTROYED"
+	draw_rect(Rect2(0, 0, w, h), Color(0, 0, 0, 0.65 * k))
+	var title := "EXTRACTED"
 	var col := Color(0.4, 1.0, 0.6)
 	if state == State.LOST:
 		title = "PILOT DOWN" if pilot_down else "MECH DOWN"
 		col = Color(1.0, 0.3, 0.2)
 	elif state == State.RETREATED:
-		title = "RETREATED"
+		title = "ABORTED"
 		col = Color(1.0, 0.8, 0.3)
 	col.a = k
-	_text(title, Vector2(w * 0.5, h * 0.36), 54, col)
-	var r: Dictionary = GameState.last_result
+	_text(title, Vector2(w * 0.5, h * 0.3), 54, col)
+	_text(String(op.get("title", "")) + " — " + String(op.get("zone", "")), Vector2(w * 0.5, h * 0.37), 22, Color(1, 1, 1, 0.8 * k))
 	var lines := [
-		"Aliens killed: %d" % kills,
-		"Hives destroyed: %d / %d" % [hives_destroyed, hives_total],
-		"Salvage caches found: %d / %d" % [caches_found, caches.size()],
-		"Credits earned: +%d     Salvage: +%d" % [r.get("credits", 0), r.get("salvage", 0)],
+		"Objective: " + ("complete" if objective_done else "not complete"),
+		"Aliens killed: %d     Survivors rescued: %d" % [kills, rescued],
+		"Found: %d scrap · %d circuits · %d biomass" % [loot["scrap"], loot["circuits"], loot["biomass"]],
+		"Ammo left: %d shells · %d rockets · %d rounds" % [ammo_left["shells"], ammo_left["rockets"], ammo_left["rounds"]],
 	]
 	if state == State.LOST:
-		lines.append("The recovery crew dragged you and your mech back to the hangar." if pilot_down else "The recovery crew dragged your mech back to the hangar.")
+		lines.append("Rafa hauled Brigid home under fire. Half the salvage was lost.")
 	for i in lines.size():
-		_text(lines[i], Vector2(w * 0.5, h * 0.48 + i * 38), 24, Color(1, 1, 1, k))
+		_text(lines[i], Vector2(w * 0.5, h * 0.46 + i * 36), 22, Color(1, 1, 1, k))
 	if end_time > 1.2:
 		var blink := 0.5 + 0.5 * sin(time * 4.0)
-		_text("TAP TO RETURN TO THE HANGAR", Vector2(w * 0.5, h * 0.8), 24, Color(1, 0.85, 0.3, blink))
+		_text("TAP TO FLY HOME TO THE ROCK", Vector2(w * 0.5, h * 0.84), 24, Color(1, 0.85, 0.3, blink))

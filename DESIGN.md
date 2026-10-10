@@ -62,12 +62,59 @@ and only bite you when they're on your level.
   change a song's tempo, scale, chords or instruments. After editing,
   bump `CACHE_VERSION` so the cached audio is rebuilt.
 
-## Core loop
-1. **Hangar:** read the mission, repair damaged parts, buy upgrades.
-2. **Battle:** find and destroy every hive. Hives keep spawning aliens
-   while you're near, so push forward.
-3. **Result:** credits and salvage come back, damage carries over.
-   Destroying all hives severs the hive mind and kills every alien left.
+## Campaign loop
+See [STORY.md](STORY.md) for the world, the characters and the story.
+1. **Map room:** pick an operation (story missions are marked ★). Each
+   costs dropship fuel; Coast Patrol is always free.
+2. **Air drop:** the Gannet drops Brigid into the zone, loaded with as much
+   ammunition as she can carry from the stockpile.
+3. **The job:** one of six mission types (below).
+4. **Extraction:** a green flare marks the landing zone. Get Brigid
+   there (the pilot must be inside) and hold it while the Gannet lands.
+5. **Night at the Rock:** loot comes home, buildings produce, the crew
+   talks, a new day starts with new operations.
+
+## Mission types
+| Type | Job |
+|---|---|
+| Destroy | Kill every hive. The song stops and the rest of the Swarm collapses. |
+| Rescue | Find survivors hiding in bunkers (on foot) and send them to the drone. |
+| Retrieve | Recover fuel canisters, data cores or supply crates. |
+| Survive | Hold out against waves until the Gannet can land. |
+| Scout | Stand by relay beacons until they come online. |
+| Boss | The Brood Mother and its guard hives. |
+
+Sometimes a stray survivor is hiding even when nobody called for help.
+
+## Resources (no money)
+| Resource | Comes from | Used for |
+|---|---|---|
+| People | Rescues | Working base modules (they need beds) |
+| Scrap | Salvage crane, caches, mission rewards | Building, repairs, ammo, research |
+| Circuits | Circuit shop, caches, scouting/retrieval | Building, rockets, research |
+| Biomass | Every alien killed (hives give lots) | Research, bioreactor fuel |
+| Fuel | Bioreactor, rewards | Every dropship flight |
+| Shells / Rockets / Rounds | Ammo factory, ammo crates | Cannon, rocket pod, carbine |
+
+## Base modules (St. Columba's Rock)
+Six build sites. Each module needs crew; output scales with how many of
+its jobs are filled, and bigger (upgraded) modules need more hands.
+| Module | Does |
+|---|---|
+| Salvage Crane | Scrap every night |
+| Ammo Factory | Scrap → shells, rockets (also circuits) or rounds; pick the focus |
+| Bioreactor | Biomass → fuel |
+| Circuit Shop | Scrap → circuits |
+| Bunkhouse | Beds (people without a bed can't work) |
+| Radio Mast | One more operation on the board |
+
+The crew also scavenges 2 scrap a night by hand, so you're never fully stuck.
+
+## Destructible terrain
+Rockets knock ruins, low walls and alien growth down to rubble (tougher
+walls take several hits); rubble is low enough to walk over. Bunker
+walls and the map edge can't be broken. Rockets also kill nearby
+survivors, destroy cargo and caches, and reset beacons.
 
 ## Mech parts (destructible)
 | Part | Effect when damaged / destroyed |
@@ -87,6 +134,12 @@ behind hit the legs, from the front hit the torso.
 - **Rocket pod:** splash damage, reload timer. Flies along the crosshair line:
   aim low to blast the ground in front of a swarm.
 
+- **Carbine (on foot):** single shots, carbine rounds.
+
+Ammunition is limited: Brigid carries what the stockpile can give, up to
+her rack capacity (shells, rockets, rounds). Unused ammo comes home.
+Ammo crates in salvage caches top you up mid-mission.
+
 Red corner brackets appear when the crosshair is on an alien.
 
 ## Aliens
@@ -100,13 +153,6 @@ Red corner brackets appear when the crosshair is on an alien.
 Aliens sleep until they see you, then chase you around walls using a
 flow field (pathfinding toward the player).
 
-## Hangar economy
-- Credits: kills, hives, victory bonus. Spent on repairs and upgrades.
-- Salvage: hives, brutes, victory. Needed for upgrades.
-- Upgrades: Autocannon Calibre, Armor Plating, Leg Servos, Rocket Pod.
-- Losing: the recovery crew brings the wreck home (torso patched to 30%).
-- Retreat button: leave early, keep kill rewards, damage carries over.
-
 ## Controls
 - **Phone:** left thumb anywhere on the left side = walking joystick;
   drag on the right side to turn and look up/down; hold FIRE (sliding on
@@ -116,6 +162,10 @@ flow field (pathfinding toward the player).
   X exit/board, Shift run on foot.
 
 ## Roadmap
+- **2.0:** story campaign (12 missions, 3 acts, cast of 6), the Rock as a
+  base with modules, people as crew, resources instead of money, limited
+  ammunition and an ammo factory, air drops and dropship extraction,
+  six mission types including wave survival, destructible terrain.
 - **1.4:** 20-song generated soundtrack and a music player bar.
 - **1.3:** climb out of the mech and explore on foot with a carbine; wider
   mech that can't fit one-square gaps; bunkers and salvage caches.
@@ -136,8 +186,10 @@ flow field (pathfinding toward the player).
 - `scripts/battle/battle.gd`: raycaster, combat, HUD, touch input.
 - `scripts/battle/level_map.gd`: grid map generation, raycasting, pathfinding.
 - `scripts/battle/alien_art.gd`: procedurally painted sprites.
-- `scripts/hangar.gd`: hangar UI.
-- `scripts/game_state.gd`: campaign data, upgrades, save/load (autoload).
+- `scripts/base/base.gd`: the Rock: map room, modules and people, Brigid, lab.
+- `scripts/base/rock_scene.gd`: animated drawing of the Rock.
+- `scripts/story.gd`: all the writing: cast, missions, radio, chatter.
+- `scripts/game_state.gd`: resources, ammo, modules, crew, research, operations, save (autoload).
 - `scripts/sfx.gd`: generated sound effects (autoload).
 - `scripts/music/composer.gd`: song composer and synthesiser.
 - `scripts/music/music.gd`: song list, player bar and caching (autoload).
