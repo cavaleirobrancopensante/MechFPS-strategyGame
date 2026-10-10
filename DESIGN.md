@@ -125,7 +125,13 @@ Gannet lifts you out comes home. Whatever isn't is lost.
   (it hangs on the Chest), kneel at a carcass and cut it open: two seconds
   with forceps and scalpel, and you have a glowing jar of biomass. Carry
   it to the Chest. Bigger aliens give more (crawler 2, brute 6, hive 12,
-  Brood Mother 40). Take the suit off at the Chest when you're done.
+  Brood Mother 40). Jars stack: keep cutting and carry up to 6 jars back
+  in one trip. Take the suit off at the Chest when you're done.
+- **The harvest team:** three volunteers ride inside the Chest. When it
+  stands still and nothing hostile is within about 10 m, they climb out in
+  hazmat suits, cut the nearest carcasses (4 seconds each, a green bar shows
+  progress) and carry the biomass back. If aliens come close they drop
+  everything and run for the Chest. You can cut alongside them.
 - **People:** survivors you find follow you, Half-Life style, until they
   reach the Chest, where they strap in on the roof. Rockets can still kill
   them on the way.
@@ -219,9 +225,10 @@ flow field (pathfinding toward the player).
 - **Phone:** left thumb anywhere on the left side = walking joystick;
   drag on the right side to turn and look up/down; hold FIRE (sliding on
   it also aims); tap RKT for rockets; EXIT MECH / CLIMB IN under the minimap.
+  On foot the RKT button becomes JUMP.
 - **Keyboard (testing):** WASD walk/strafe, arrows or Q/E turn,
   T/G or PageUp/PageDown look up/down, Space fire, R or F rockets,
-  X exit/board, Shift run on foot.
+  X exit/board, Shift run on foot, J jump, C context action.
 
 ## The Rock's screen
 See [docs/UI_STUDY.md](docs/UI_STUDY.md) for the study behind it. Resource
@@ -233,6 +240,7 @@ coloured by type, briefing on the right, LAUNCH always visible),
 hints like "3 idle" or "! repair".
 
 ## Roadmap
+- **3.3:** jump on foot (and the pilot now climbs any step Brigid can); the harvest team; stack up to 6 biomass jars; the carbine's left hand grips the barrel.
 - **3.2:** alien bodies stay; the Chest (cargo walker) that everything must be carried to; hazmat suit and biomass harvesting; survivors follow you to the Chest.
 - **3.1:** two new aliens: the Flyer and the Burrower.
 - **3.0:** main menu (Survival, Continue, New Game, Load Game with 3 slots,

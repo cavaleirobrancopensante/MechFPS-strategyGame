@@ -60,6 +60,17 @@ var hazmat := false
 var harvest_t := 0.0
 var harvest_target = null
 var hands_msg_cd := 0.0
+var jump_z := 0.0             ## height above the ground while jumping (on foot)
+var jump_v := 0.0
+var want_jump := false
+const MAX_JARS := 6
+## The harvest team: volunteers riding in the Chest who climb out in hazmat
+## suits and cut biomass from nearby carcasses whenever the area is quiet.
+const CREW_COUNT := 3
+const CREW_CUT_TIME := 4.0
+var crew: Array = []
+var chest_still_t := 0.0
+var crew_told := false
 
 # --- Controls -----------------------------------------------------------------
 const MECH_R := LevelMap.MECH_R
@@ -67,7 +78,9 @@ const PILOT_R := 0.15
 const PILOT_EYE := 0.55
 const PILOT_WALK := 2.2
 const PILOT_RUN := 3.8
-const PILOT_STEP := 0.55
+const PILOT_STEP := 0.65     ## the pilot climbs anything Brigid can
+const JUMP_V := 5.2
+const GRAVITY := 15.0
 const BOARD_DIST := 1.6
 const CLIMB_TIME := 1.3
 const DROP_TIME := 2.6
@@ -510,6 +523,17 @@ func _update_player(delta: float) -> void:
 		step_h = PILOT_STEP
 	var mv := inp * speed * delta
 	var stand := map.height_at(pos)
+	if on_foot:
+		if want_jump and jump_z <= 0.0 and not falling:
+			jump_v = JUMP_V
+			jump_z = 0.001
+			Sfx.play("step", -10.0, 0.1, 1.6)
+		want_jump = false
+		if jump_z > 0.0:
+			jump_v -= GRAVITY * delta
+			jump_z += jump_v * delta
+			# In the air you clear whatever you've jumped above.
+			stand = maxf(stand, floor_z + jump_z)
 	var nx := pos + Vector2(mv.x, 0.0)
 	if not map.blocked(nx, body_r, stand, step_h) and not _parked_mech_blocks(nx, body_r) and not (_chest_blocks(nx, body_r) and not _chest_blocks(pos, body_r)):
 		pos = nx
@@ -519,7 +543,16 @@ func _update_player(delta: float) -> void:
 
 	# Climb steps smoothly; drop off ledges with a heavy landing.
 	var target := map.height_at(pos)
-	if target < floor_z - 0.3:
+	if jump_z > 0.0:
+		if target > floor_z:
+			# Landed on something higher: the jump height becomes floor.
+			jump_z = maxf(0.0, jump_z - (target - floor_z))
+			floor_z = target
+		if jump_z <= 0.0 or (jump_v < 0.0 and floor_z + jump_z <= target):
+			jump_z = 0.0
+			jump_v = 0.0
+			Sfx.play("step", -8.0, 0.1, 1.3)
+	if target < floor_z - 0.3 and jump_z <= 0.0:
 		falling = true
 	if target > floor_z:
 		floor_z = move_toward(floor_z, target, delta * 3.0)
@@ -529,7 +562,7 @@ func _update_player(delta: float) -> void:
 		falling = false
 		shake = maxf(shake, 12.0)
 		Sfx.play("step", -1.0)
-	eye_z = floor_z + eye_h
+	eye_z = floor_z + eye_h + jump_z
 	_check_caches()
 	if not on_foot:
 		_crush_props()
@@ -1469,6 +1502,11 @@ func _update_drop(delta: float) -> void:
 
 
 func _update_lift(delta: float) -> void:
+	for c in crew:
+		if c["state"] != "in":
+			loot["biomass"] += int(c["carry"])
+			c["carry"] = 0
+			c["state"] = "in"
 	lift_t += delta
 	var k := clampf(lift_t / LIFT_TIME, 0.0, 1.0)
 	eye_z = floor_z + EYE + 24.0 * k * k
@@ -1766,6 +1804,9 @@ func _spawn_chest() -> void:
 			spot = p
 			break
 	chest = {"pos": spot, "fz": map.height_at(spot) + 26.0, "face": angle, "anim": 0.0, "moving": false, "stuck_t": 0.0}
+	for i in CREW_COUNT:
+		crew.append({"state": "in", "pos": spot, "z": map.height_at(spot), "face": 0.0, "target": null, "t": 0.0,
+			"carry": 0, "moving": false, "stuck_t": 0.0, "anim": rng.randf() * 3.0})
 
 
 func _chest_blocks(p: Vector2, r: float) -> bool:
@@ -1827,6 +1868,7 @@ func _update_chest(delta: float) -> void:
 	if not get_meta("chest_told", false) and phase == "fight" and time > 9.0 and GameState.missions_won < 3:
 		set_meta("chest_told", true)
 		_radio_line("mags", "The Chest is trotting behind you. Everything goes in it: scrap, circuits, biomass, people. Hazmat suit's on its hook.")
+	_update_crew(delta)
 	# Anything carried in is stowed; anyone following straps in.
 	if on_foot and not carrying.is_empty() and _near_chest():
 		_deposit()
@@ -1892,13 +1934,138 @@ func _update_followers(delta: float) -> void:
 		sv["z"] = map.height_at(sv["pos"])
 
 
+# --- The harvest team ------------------------------------------------------------
+
+func _threat_near(p: Vector2, radius: float) -> bool:
+	for a in aliens:
+		if not a["dead"] and a["awake"] and not _is_nest(a) and not a.get("under", false) and a["pos"].distance_to(p) < radius:
+			return true
+	return false
+
+
+func _update_crew(delta: float) -> void:
+	## Volunteers in hazmat suits climb out of the Chest when it stands still
+	## and nothing hostile is close, cut biomass from nearby carcasses, and
+	## carry it back. At the first sign of trouble they run for the Chest.
+	var cp: Vector2 = chest["pos"]
+	chest_still_t = 0.0 if chest["moving"] else chest_still_t + delta
+	var calm := not _threat_near(cp, 10.0)
+	for c in crew:
+		match c["state"]:
+			"in":
+				c["pos"] = cp
+				if calm and chest_still_t > 1.5 and phase != "lift":
+					var target = _crew_pick_corpse(cp)
+					if target != null:
+						target["claimed"] = true
+						c["target"] = target
+						c["state"] = "go"
+						c["stuck_t"] = 0.0
+						if not crew_told:
+							crew_told = true
+							_radio_line("sandoval", "Area's quiet. My harvest team is going out to cut. Keep the bugs off them, Wren.")
+			"go":
+				var tgt: Dictionary = c["target"]
+				if _crew_danger(c, cp):
+					continue
+				if _crew_move(c, tgt["pos"], 2.0, 0.55, delta):
+					c["state"] = "cut"
+					c["t"] = 0.0
+					c["face"] = (tgt["pos"] - c["pos"]).angle()
+				elif c["stuck_t"] > 2.5:
+					tgt["claimed"] = false
+					tgt["crew_skip"] = true
+					c["state"] = "back"
+			"cut":
+				if _crew_danger(c, cp):
+					continue
+				c["t"] += delta
+				c["anim"] += delta
+				if fmod(c["t"], 0.9) < delta and pos.distance_to(c["pos"]) < 8.0:
+					Sfx.play("splat", -18.0, 0.3, 1.4)
+				if c["t"] >= CREW_CUT_TIME:
+					var tgt2: Dictionary = c["target"]
+					tgt2["harvested"] = true
+					tgt2["claimed"] = false
+					c["carry"] = int(BIOMASS_YIELD.get(tgt2["kind"], 1))
+					c["target"] = null
+					c["state"] = "back"
+					c["stuck_t"] = 0.0
+			"back":
+				var arrived := _crew_move(c, cp, 1.9 if c["carry"] > 0 else 2.6, 0.8, delta)
+				if arrived or c["stuck_t"] > 3.0:
+					if c["carry"] > 0:
+						loot["biomass"] += int(c["carry"])
+						_show_msg("+%d BIOMASS — HARVEST TEAM" % c["carry"], 1.8)
+						Sfx.play("pickup", -8.0, 0.0, 1.2)
+					c["carry"] = 0
+					c["state"] = "in"
+
+
+func _crew_pick_corpse(from: Vector2):
+	var best = null
+	var bd := 11.0
+	var fz := map.height_at(from)
+	for cp in corpses:
+		if cp["harvested"] or cp.get("claimed", false) or cp.get("crew_skip", false):
+			continue
+		var d: float = from.distance_to(cp["pos"])
+		if d < bd and absf(cp["z"] - fz) < 1.0 and map.line_of_sight(from, fz + 0.4, cp["pos"], cp["z"] + 0.4) \
+				and (harvest_target == null or cp != harvest_target):
+			bd = d
+			best = cp
+	return best
+
+
+func _crew_danger(c: Dictionary, cp: Vector2) -> bool:
+	if _threat_near(c["pos"], 7.0) or c["pos"].distance_to(cp) > 13.0:
+		if c["target"] != null:
+			c["target"]["claimed"] = false
+			c["target"] = null
+		c["state"] = "back"
+		c["stuck_t"] = 0.0
+		if not get_meta("crew_fallback_cd", false):
+			set_meta("crew_fallback_cd", true)
+			_show_msg("HARVEST TEAM FALLING BACK TO THE CHEST", 2.0)
+			get_tree().create_timer(8.0).timeout.connect(func(): set_meta("crew_fallback_cd", false))
+		return true
+	return false
+
+
+func _crew_move(c: Dictionary, target: Vector2, speed: float, arrive: float, delta: float) -> bool:
+	var p: Vector2 = c["pos"]
+	var to_t := target - p
+	var d := to_t.length()
+	if d < arrive:
+		c["moving"] = false
+		return true
+	var step := to_t / d * speed * delta
+	var stand := map.height_at(p)
+	var moved := false
+	for axis in 2:
+		var np := p + (Vector2(step.x, 0.0) if axis == 0 else Vector2(0.0, step.y))
+		if not map.blocked(np, 0.15, stand, PILOT_STEP):
+			p = np
+			moved = true
+	c["pos"] = p
+	c["z"] = map.height_at(p)
+	c["moving"] = moved
+	c["face"] = step.angle()
+	if moved:
+		c["anim"] += delta
+		c["stuck_t"] = 0.0
+	else:
+		c["stuck_t"] += delta
+	return false
+
+
 # --- Harvesting biomass ----------------------------------------------------------
 
 func _nearest_corpse():
 	var best = null
 	var bd := 1.6
 	for c in corpses:
-		if c["harvested"]:
+		if c["harvested"] or c.get("claimed", false):
 			continue
 		var d: float = pos.distance_to(c["pos"])
 		if d < bd and absf(c["z"] - floor_z) < 0.8:
@@ -1919,7 +2086,16 @@ func _update_harvest(delta: float) -> void:
 		c["harvested"] = true
 		harvest_t = 0.0
 		harvest_target = null
-		_carry("biomass", int(BIOMASS_YIELD.get(c["kind"], 1)), null)
+		var amount := int(BIOMASS_YIELD.get(c["kind"], 1))
+		if carrying.get("kind", "") == "biomass":
+			# Jars stack: keep cutting, deliver them all in one trip.
+			carrying["amount"] += amount
+			carrying["jars"] += 1
+			Sfx.play("pickup", -4.0, 0.05, 1.1)
+			_show_msg("+%d BIOMASS — %d JARS, %d IN ALL (MAX %d JARS)" % [amount, carrying["jars"], carrying["amount"], MAX_JARS], 2.0)
+		else:
+			_carry("biomass", amount, null)
+			carrying["jars"] = 1
 
 
 func _action() -> Array:
@@ -1928,9 +2104,11 @@ func _action() -> Array:
 		return []
 	if harvest_t > 0.0:
 		return ["HARVESTING…", false]
+	var corpse = null if survival else _nearest_corpse()
+	if hazmat and corpse != null and carrying.get("kind", "") == "biomass" and int(carrying.get("jars", 1)) < MAX_JARS:
+		return ["HARVEST (JAR %d/%d)" % [int(carrying["jars"]) + 1, MAX_JARS], true]
 	if not carrying.is_empty():
 		return ["DROP " + String(CARRY_NAMES[carrying["kind"]]), true]
-	var corpse = null if survival else _nearest_corpse()
 	if hazmat and corpse != null:
 		return ["HARVEST BIOMASS", true]
 	if _near_chest():
@@ -1952,7 +2130,7 @@ func _do_action() -> void:
 	Sfx.play("click")
 	if label.begins_with("DROP"):
 		_drop_carried()
-	elif label == "HARVEST BIOMASS":
+	elif label.begins_with("HARVEST"):
 		harvest_target = _nearest_corpse()
 		harvest_t = 0.001
 		fire_touch = -1
@@ -2107,6 +2285,8 @@ func _input(event: InputEvent) -> void:
 			_leave()
 		elif state == State.PLAYING and (event.keycode == KEY_ESCAPE or event.keycode == KEY_P):
 			_set_paused(true)
+		elif state == State.PLAYING and event.keycode == KEY_J:
+			want_jump = true
 		elif state == State.PLAYING and event.keycode == KEY_C:
 			_do_action()
 		elif state == State.PLAYING and event.keycode == KEY_X:
@@ -2139,6 +2319,9 @@ func _input(event: InputEvent) -> void:
 				return
 			if not on_foot and p.distance_to(_rocket_center(s)) < ROCKET_R * 1.25:
 				_fire_rocket()
+				return
+			if on_foot and p.distance_to(_rocket_center(s)) < ROCKET_R * 1.25:
+				want_jump = true
 				return
 			if p.x < s.x * 0.45:
 				if move_touch < 0:
@@ -2695,6 +2878,12 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 		var pr := _project(chest["pos"])
 		if pr.y > 0.15 and pr.y < MAX_VIEW:
 			items.append([pr.y, 13, chest, pr.x])
+	for c in crew:
+		if c["state"] == "in":
+			continue
+		var pr := _project(c["pos"])
+		if pr.y > 0.15 and pr.y < MAX_VIEW:
+			items.append([pr.y - 0.02, 14, c, pr.x])
 	for it in cargo:
 		if it["taken"]:
 			continue
@@ -2835,6 +3024,18 @@ func _draw_sprites(w: float, h: float, horizon: float, proj_scale: float) -> voi
 				var itex: Texture2D = _view_frame(o["kind"], o["face"], o["pos"], time * 3.0 + o["anim"])
 				var il: float = tex3d[o["kind"]]["L"]
 				_billboard(itex, sx, ty, il, il, o["z"], tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+			14:
+				var hk := "hazmat_cut" if o["state"] == "cut" else ("hazmat_carry" if o["carry"] > 0 else "hazmat_walk")
+				var hl: float = tex3d[hk]["L"]
+				_draw_shadow(o["pos"], o["z"], 0.16, horizon, proj_scale, fog, ty)
+				var hf: Texture2D = _view_frame(hk, o["face"], o["pos"], o["anim"] * (5.0 if o["state"] == "cut" else 6.0) if o["moving"] or o["state"] == "cut" else 0.0)
+				_billboard(hf, sx, ty, hl, hl, o["z"], tint.lerp(FOG, fog * 0.6), horizon, proj_scale, col_w)
+				if o["state"] == "cut":
+					var br := _body_rect(sx, ty, 0.5, 0.7, o["z"], horizon, proj_scale)
+					if br.size.x > 4.0:
+						var pb := Rect2(br.position.x - 6, br.position.y - 10, br.size.x + 12, 5)
+						draw_rect(pb, Color(0, 0, 0, 0.6))
+						draw_rect(Rect2(pb.position, Vector2(pb.size.x * clampf(o["t"] / CREW_CUT_TIME, 0.0, 1.0), pb.size.y)), Color(0.5, 1.0, 0.3))
 			11:
 				# A carcass. Harvested ones are hollowed out and grey.
 				var ck: String = o["kind"] + "_dead"
@@ -3020,7 +3221,7 @@ func _carbine_geom(w: float, h: float) -> Array:
 
 
 func _glove_col() -> Color:
-	return Color(0.9, 0.78, 0.15) if hazmat else Color(0.15, 0.13, 0.11)
+	return Color(0.9, 0.78, 0.15) if hazmat else Color(0.4, 0.3, 0.2)
 
 
 func _draw_carried(w: float, h: float) -> void:
@@ -3048,13 +3249,19 @@ func _draw_carried(w: float, h: float) -> void:
 				for j in 6:
 					draw_rect(Rect2(r2.position + Vector2(14 + j * 34, 4), Vector2(16, 8)), Color(0.12, 0.12, 0.12) if j % 2 == 0 else Color(0.9, 0.75, 0.3))
 		"biomass":
+			# A stack of jars in a carry crate, up to MAX_JARS.
 			var glow := 0.75 + 0.25 * sin(time * 4.0)
-			draw_circle(c + Vector2(0, -70), 95.0, Color(0.5, 1.0, 0.3, 0.12 * glow))
-			draw_rect(Rect2(c + Vector2(-60, -150), Vector2(120, 140)), Color(0.45, 0.95, 0.3, 0.85 * glow))
-			for k in 4:
-				draw_circle(c + Vector2(-30 + k * 20, -40 - fmod(time * 40.0 + k * 30.0, 100.0)), 6.0, Color(0.8, 1.0, 0.6, 0.6))
-			draw_rect(Rect2(c + Vector2(-68, -165), Vector2(136, 22)), Color(0.4, 0.42, 0.45))
-			draw_rect(Rect2(c + Vector2(-68, -14), Vector2(136, 18)), Color(0.4, 0.42, 0.45))
+			var jars := int(carrying.get("jars", 1))
+			draw_circle(c + Vector2(0, -70), 110.0, Color(0.5, 1.0, 0.3, 0.1 * glow))
+			for j in jars:
+				var col_i := j % 3
+				var row_i := j / 3
+				var jc := c + Vector2((col_i - 1) * 78.0 + (row_i * 20.0), -60.0 - row_i * 92.0)
+				draw_rect(Rect2(jc + Vector2(-32, -45), Vector2(64, 80)), Color(0.45, 0.95, 0.3, 0.85 * glow))
+				draw_circle(jc + Vector2(-8, -fmod(time * 30.0 + j * 17.0, 60.0) + 20.0), 4.0, Color(0.8, 1.0, 0.6, 0.6))
+				draw_rect(Rect2(jc + Vector2(-36, -55), Vector2(72, 13)), Color(0.4, 0.42, 0.45))
+				draw_rect(Rect2(jc + Vector2(-36, 33), Vector2(72, 10)), Color(0.4, 0.42, 0.45))
+			draw_rect(Rect2(c + Vector2(-135, -2), Vector2(270, 26)), Color(0.3, 0.25, 0.18))
 		_:
 			var col := Color(0.55, 0.45, 0.3)
 			match String(carrying["model"]):
@@ -3141,6 +3348,18 @@ func _draw_pilot_gun(w: float, h: float) -> void:
 	var mag := base.lerp(tip, 0.45)
 	draw_colored_polygon(PackedVector2Array([mag - n * 14, mag - n * 14 + dir * 22, mag - n * 52 + dir * 16, mag - n * 50 - dir * 4]), Color(0.14, 0.14, 0.15))
 	draw_line(tip, muz, Color(0.1, 0.1, 0.11), 10.0)
+	# Left hand gripping the barrel: palm underneath, fingers wrapped over
+	# the top, arm coming in from the bottom left.
+	var fore := base.lerp(tip, 0.74)
+	var sleeve := Color(0.85, 0.72, 0.12) if hazmat else Color(0.22, 0.25, 0.2)
+	var gc := _glove_col()
+	draw_colored_polygon(PackedVector2Array([Vector2(w * 0.28, h + 40), Vector2(w * 0.44, h + 40), fore - n * 10.0 + dir * 22.0, fore - n * 34.0 - dir * 6.0]), sleeve)
+	draw_colored_polygon(PackedVector2Array([fore - n * 12.0 - dir * 20.0, fore - n * 12.0 + dir * 24.0, fore - n * 38.0 + dir * 18.0, fore - n * 40.0 - dir * 14.0]), gc)
+	for k in 4:
+		var fp := fore + dir * (-14.0 + k * 11.0)
+		draw_line(fp - n * 14.0, fp + n * 15.0, gc.darkened(0.45), 10.0)
+		draw_line(fp - n * 13.0, fp + n * 13.0, gc, 7.0)
+	draw_line(fore - n * 16.0 - dir * 22.0, fore + n * 4.0 - dir * 26.0, gc, 9.0)
 	var sight := base.lerp(tip, 0.7) + n * 16
 	draw_rect(Rect2(sight - Vector2(5, 9), Vector2(10, 9)), Color(0.12, 0.12, 0.13))
 	draw_circle(sight + Vector2(0, -4), 2.0, Color(0.4, 1.0, 0.6))
@@ -3358,6 +3577,8 @@ func _draw_hud(w: float, h: float, horizon: float, proj_scale: float) -> void:
 		var fy := h * 0.955
 		if not carrying.is_empty():
 			var what := "CARGO" if carrying["kind"] == "cargo" else "%d %s" % [carrying["amount"], CARRY_NAMES[carrying["kind"]]]
+			if carrying["kind"] == "biomass":
+				what += " (%d/%d JARS)" % [int(carrying.get("jars", 1)), MAX_JARS]
 			_text("CARRYING %s — TAKE IT TO THE CHEST%s" % [what, "   ·   HAZMAT ON" if hazmat else ""], Vector2(w * 0.5, fy), 17, Color(1.0, 0.8, 0.3))
 		else:
 			_text("CARBINE  %s ROUNDS    %s%s" % [_ammo_str("rounds"), "RUNNING" if running else "PUSH STICK ALL THE WAY TO RUN", "   ·   HAZMAT ON" if hazmat else ""], Vector2(w * 0.5, fy), 17, hud if ammo_left["rounds"] > 0 else Color(1, 0.3, 0.2))
@@ -3473,6 +3694,12 @@ func _draw_minimap(w: float) -> void:
 			var frl: Vector2 = sv2["pos"] - pos
 			if absf(frl.x) < radius - 0.3 and absf(frl.y) < radius - 0.3:
 				draw_circle(center + frl * cs, 3.0, Color(0.6, 1.0, 1.0))
+	for c in crew:
+		if c["state"] == "in":
+			continue
+		var crl2: Vector2 = c["pos"] - pos
+		if absf(crl2.x) < radius - 0.3 and absf(crl2.y) < radius - 0.3:
+			draw_circle(center + crl2 * cs, 2.5, Color(1.0, 0.9, 0.2))
 	if not chest.is_empty():
 		var chr: Vector2 = chest["pos"] - pos
 		var chc := Color(1.0, 0.65, 0.15)
@@ -3574,7 +3801,13 @@ func _draw_touch_controls(w: float, h: float) -> void:
 	draw_arc(fc, FIRE_R, 0, TAU, 48, Color(1, 0.5, 0.4, 0.8), 3.0)
 	_text("FIRE", fc + Vector2(0, 9), 26, Color(1, 1, 1, 0.85))
 
-	if on_foot or climb_t > 0.0:
+	if climb_t > 0.0:
+		return
+	if on_foot:
+		var jc := _rocket_center(Vector2(w, h))
+		draw_circle(jc, ROCKET_R, Color(0.3, 0.7, 1.0, 0.35 if jump_z <= 0.0 else 0.15))
+		draw_arc(jc, ROCKET_R, 0, TAU, 40, Color(0.6, 0.85, 1.0, 0.9), 3.0)
+		_text("JUMP", jc + Vector2(0, 7), 20, Color(1, 1, 1, 0.85))
 		return
 	var rc := _rocket_center(Vector2(w, h))
 	var rk_ready := clampf(1.0 - rocket_cd / GameState.rocket_cooldown(), 0.0, 1.0)
