@@ -8,8 +8,9 @@ Comanche family of tricks) over a 2D grid map, so it runs light on
 phones and the whole game is plain GDScript: no models, images or
 audio files, and even the 20-song soundtrack is composed in code.
 
-- Open the folder in Godot 4.7 and press Play. It starts at the Rock, your base.
+- Open the folder in Godot 4.7 and press Play. It starts at the main menu:
+  **Survival** for endless waves just for fun, or **New Game** for the campaign.
 - See [STORY.md](STORY.md) for the world and characters, and
   [DESIGN.md](DESIGN.md) for the game design, controls and roadmap.
 
-Version: **2.1**
+Version: **3.0**

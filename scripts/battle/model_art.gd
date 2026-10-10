@@ -31,6 +31,10 @@ static func build_all() -> Dictionary:
 	out["item_data"] = _view_set(0.65, 48, 2, func(ph): return _datacore(ph))
 	out["beacon_off"] = _view_set(2.6, 96, 1, func(ph): return _beacon(false))
 	out["beacon_on"] = _view_set(2.6, 96, 1, func(ph): return _beacon(true))
+	out["pine"] = _view_set(3.2, 96, 1, func(ph): return _pine())
+	out["tree"] = _view_set(3.0, 96, 1, func(ph): return _tree())
+	out["car"] = _view_set(1.8, 64, 1, func(ph): return _car())
+	out["barrel"] = _view_set(0.7, 40, 1, func(ph): return _barrels())
 	_cache = out
 	return out
 
@@ -392,3 +396,54 @@ static func _beacon(lit: bool) -> Array:
 	parts.append(_box(Vector3(0, 2.25, 0.08), Vector3(0.16, 0.12, 0.02), steel.darkened(0.2), 0.0, 0.5))
 	parts.append(_ball(Vector3(0, 2.46, 0), 0.09, Color(0.3, 1.0, 0.5) if lit else Color(0.95, 0.2, 0.15), true))
 	return parts
+
+
+# --- Scenery -----------------------------------------------------------------
+
+static func _pine() -> Array:
+	var parts: Array = [_seg(Vector3(0, 0, 0), Vector3(0, 0.9, 0), 0.08, Color(0.35, 0.24, 0.15))]
+	var green := Color(0.16, 0.36, 0.2)
+	for i in 4:
+		var y := 0.7 + i * 0.55
+		var r := 0.85 - i * 0.18
+		parts.append(_ell(Vector3(0.02 * i, y, 0), Vector3(r, 0.42, r), green.lightened(i * 0.05), Vector3.ZERO, 0.1))
+	parts.append(_ell(Vector3(0, 2.75, 0), Vector3(0.2, 0.35, 0.2), green.lightened(0.2)))
+	return parts
+
+
+static func _tree() -> Array:
+	var bark := Color(0.38, 0.27, 0.17)
+	var leaf := Color(0.24, 0.42, 0.18)
+	return [
+		_seg(Vector3(0, 0, 0), Vector3(0.05, 1.4, 0), 0.12, bark),
+		_seg(Vector3(0.03, 1.1, 0), Vector3(0.5, 1.7, 0.1), 0.06, bark),
+		_seg(Vector3(0.03, 1.2, 0), Vector3(-0.45, 1.8, -0.1), 0.06, bark),
+		_ell(Vector3(0, 2.05, 0), Vector3(0.95, 0.75, 0.9), leaf, Vector3.ZERO, 0.1),
+		_ell(Vector3(0.5, 1.8, 0.25), Vector3(0.55, 0.45, 0.5), leaf.lightened(0.08)),
+		_ell(Vector3(-0.5, 1.85, -0.2), Vector3(0.5, 0.45, 0.5), leaf.darkened(0.08)),
+		_ell(Vector3(0.1, 2.5, 0.1), Vector3(0.5, 0.35, 0.45), leaf.lightened(0.15)),
+	]
+
+
+static func _car() -> Array:
+	## A burnt-out car, nose to +z.
+	var paint := Color(0.45, 0.22, 0.18)
+	var parts: Array = [
+		_box(Vector3(0, 0.32, 0), Vector3(0.38, 0.16, 0.8), paint, 0.0, 0.4),
+		_box(Vector3(0, 0.6, -0.08), Vector3(0.34, 0.14, 0.42), paint.darkened(0.15), 0.0, 0.3),
+		_box(Vector3(0, 0.6, 0.35), Vector3(0.3, 0.1, 0.02), Color(0.1, 0.12, 0.14), 0.0, 0.8),
+		_box(Vector3(0, 0.3, 0.81), Vector3(0.3, 0.05, 0.01), Color(0.2, 0.2, 0.2)),
+	]
+	for x in [-0.36, 0.36]:
+		for z in [-0.5, 0.5]:
+			parts.append(_ell(Vector3(x, 0.16, z), Vector3(0.06, 0.16, 0.16), Color(0.08, 0.08, 0.08)))
+	return parts
+
+
+static func _barrels() -> Array:
+	var rust := Color(0.6, 0.3, 0.15)
+	return [
+		_ell(Vector3(-0.12, 0.22, 0), Vector3(0.13, 0.22, 0.13), rust, Vector3.ZERO, 0.5),
+		_ell(Vector3(0.14, 0.22, 0.06), Vector3(0.13, 0.22, 0.13), Color(0.25, 0.4, 0.55), Vector3.ZERO, 0.5),
+		_box(Vector3(-0.12, 0.3, 0), Vector3(0.135, 0.02, 0.135), Color(0.9, 0.75, 0.2)),
+	]

@@ -29,7 +29,22 @@ var hard := PackedByteArray()         ## 1 = can't be blasted (bunkers, map edge
 var wall_hp := PackedByteArray()      ## rocket hits left before a wall collapses
 
 
-func generate(seed_value: int, hive_count: int) -> void:
+var layout := "ruins"
+
+const LAYOUTS := {
+	## hills amplitude, craters, platforms
+	"ruins": [1.8, 3, 4],
+	"town": [1.0, 2, 2],
+	"quarry": [3.2, 5, 6],
+	"village": [1.6, 2, 2],
+	"forest": [2.0, 5, 2],
+	"industrial": [0.8, 2, 4],
+}
+
+
+func generate(seed_value: int, hive_count: int, layout_name := "ruins") -> void:
+	layout = layout_name if LAYOUTS.has(layout_name) else "ruins"
+	var lay: Array = LAYOUTS[layout]
 	rng.seed = seed_value
 	var n := w * h
 	kinds.resize(n)
@@ -48,7 +63,7 @@ func generate(seed_value: int, hive_count: int) -> void:
 	noise.frequency = 0.07
 	for y in h:
 		for x in w:
-			var t := snappedf(clampf(noise.get_noise_2d(x, y) * 1.8, 0.0, 0.75), 0.25)
+			var t := snappedf(clampf(noise.get_noise_2d(x, y) * lay[0], 0.0, 0.75 if layout != "quarry" else 1.5), 0.25)
 			terrain[idx(x, y)] = t
 			heights[idx(x, y)] = t
 
@@ -60,7 +75,7 @@ func generate(seed_value: int, hive_count: int) -> void:
 	start = Vector2(3.5, 3.5)
 
 	# 3. Craters: a ring at -0.5 and a floor at -1.0, so you can walk in and out.
-	for i in 3:
+	for i in int(lay[1]):
 		var r := rng.randf_range(2.0, 3.0)
 		var c := Vector2(rng.randf_range(7, w - 6), rng.randf_range(7, h - 6))
 		for yy in range(int(c.y - r - 1), int(c.y + r + 2)):
@@ -75,7 +90,7 @@ func generate(seed_value: int, hive_count: int) -> void:
 					_reserve(xx, yy)
 
 	# 4. Raised platforms with a staircase down one side.
-	for i in 4:
+	for i in int(lay[2]):
 		var pw := rng.randi_range(3, 5)
 		var ph := rng.randi_range(3, 4)
 		var px := rng.randi_range(2, w - 3 - pw)
@@ -140,42 +155,14 @@ func generate(seed_value: int, hive_count: int) -> void:
 		_set_cell(door.x, door.y, EMPTY, floor_h)
 		bunker_interiors.append(Rect2i(bx + 1, by + 1, bw - 2, bh - 2))
 
-	# 5. Tall ruined buildings of varied height.
-	for i in 30:
-		var bw := rng.randi_range(1, 4)
-		var bh := rng.randi_range(1, 3)
-		if rng.randf() < 0.5:
-			var tmp := bw
-			bw = bh
-			bh = tmp
-		var bx := rng.randi_range(1, w - 1 - bw)
-		var by := rng.randi_range(1, h - 1 - bh)
-		var kind := RUIN if rng.randf() < 0.7 else METAL
-		var base := 0.0
-		for yy in bh:
-			for xx in bw:
-				base = maxf(base, terrain[idx(bx + xx, by + yy)])
-		var tall := snappedf(base + rng.randf_range(2.4, 4.2), 0.2)
-		var hollow := bw >= 3 and bh >= 3 and rng.randf() < 0.5
-		for yy in bh:
-			for xx in bw:
-				if hollow and xx > 0 and yy > 0 and xx < bw - 1 and yy < bh - 1:
-					continue
-				if not _reserved[idx(bx + xx, by + yy)]:
-					# Ragged roofs: each cell a little different.
-					_set_cell(bx + xx, by + yy, kind, tall - rng.randi_range(0, 2) * 0.4)
-
-	# 6. Low cover walls you can see and shoot over, but not walk through.
-	for i in 10:
-		var length := rng.randi_range(2, 5)
-		var horizontal := rng.randf() < 0.5
-		var x0 := rng.randi_range(2, w - 3)
-		var y0 := rng.randi_range(2, h - 3)
-		for k in length:
-			var xx := x0 + (k if horizontal else 0)
-			var yy := y0 + (0 if horizontal else k)
-			if _inner(xx, yy) and not _reserved[idx(xx, yy)] and kinds[idx(xx, yy)] == EMPTY:
-				_set_cell(xx, yy, RUIN, terrain[idx(xx, yy)] + 0.95)
+	# 5–6. Buildings, walls and cover, in the zone's layout style.
+	match layout:
+		"town": _layout_town()
+		"quarry": _layout_scatter(10, 1, 3, 2.0, 3.2, 6)
+		"village": _layout_village()
+		"forest": _layout_scatter(12, 1, 3, 2.2, 3.4, 6)
+		"industrial": _layout_industrial()
+		_: _layout_ruins()
 
 	# 7. Map border.
 	for x in w:
@@ -249,6 +236,154 @@ func generate(seed_value: int, hive_count: int) -> void:
 			for xx in range(r.position.x - 1, r.end.x + 1):
 				if in_bounds(xx, yy) and is_solid(xx, yy):
 					hard[idx(xx, yy)] = 1
+
+
+func _layout_ruins() -> void:
+	## Ruined buildings of varied height and low cover walls.
+	for i in 30:
+		var bw := rng.randi_range(1, 4)
+		var bh := rng.randi_range(1, 3)
+		if rng.randf() < 0.5:
+			var tmp := bw
+			bw = bh
+			bh = tmp
+		var bx := rng.randi_range(1, w - 1 - bw)
+		var by := rng.randi_range(1, h - 1 - bh)
+		var kind := RUIN if rng.randf() < 0.7 else METAL
+		var base := 0.0
+		for yy in bh:
+			for xx in bw:
+				base = maxf(base, terrain[idx(bx + xx, by + yy)])
+		var tall := snappedf(base + rng.randf_range(2.4, 4.2), 0.2)
+		var hollow := bw >= 3 and bh >= 3 and rng.randf() < 0.5
+		for yy in bh:
+			for xx in bw:
+				if hollow and xx > 0 and yy > 0 and xx < bw - 1 and yy < bh - 1:
+					continue
+				if not _reserved[idx(bx + xx, by + yy)]:
+					# Ragged roofs: each cell a little different.
+					_set_cell(bx + xx, by + yy, kind, tall - rng.randi_range(0, 2) * 0.4)
+
+	for i in 10:
+		var length := rng.randi_range(2, 5)
+		var horizontal := rng.randf() < 0.5
+		var x0 := rng.randi_range(2, w - 3)
+		var y0 := rng.randi_range(2, h - 3)
+		for k in length:
+			var xx := x0 + (k if horizontal else 0)
+			var yy := y0 + (0 if horizontal else k)
+			if _inner(xx, yy) and not _reserved[idx(xx, yy)] and kinds[idx(xx, yy)] == EMPTY:
+				_set_cell(xx, yy, RUIN, terrain[idx(xx, yy)] + 0.95)
+
+
+
+func _building(bx: int, by: int, bw: int, bh: int, kind: int, tall: float, ragged: bool, hollow: bool) -> void:
+	var base := 0.0
+	for yy in bh:
+		for xx in bw:
+			if in_bounds(bx + xx, by + yy):
+				base = maxf(base, terrain[idx(bx + xx, by + yy)])
+	for yy in bh:
+		for xx in bw:
+			var x := bx + xx
+			var y := by + yy
+			if not _inner(x, y) or _reserved[idx(x, y)]:
+				continue
+			if hollow and xx > 0 and yy > 0 and xx < bw - 1 and yy < bh - 1:
+				continue
+			_set_cell(x, y, kind, base + tall - (rng.randi_range(0, 2) * 0.4 if ragged else 0.0))
+
+
+func _low_wall(x0: int, y0: int, length: int, horizontal: bool, kind: int, height: float) -> void:
+	for k in length:
+		var xx := x0 + (k if horizontal else 0)
+		var yy := y0 + (0 if horizontal else k)
+		if _inner(xx, yy) and not _reserved[idx(xx, yy)] and kinds[idx(xx, yy)] == EMPTY:
+			_set_cell(xx, yy, kind, terrain[idx(xx, yy)] + height)
+
+
+func _layout_scatter(count: int, min_size: int, max_size: int, hmin: float, hmax: float, walls: int) -> void:
+	## Sparse sheds and ruins in open ground (quarry, forest).
+	for i in count:
+		var bw := rng.randi_range(min_size, max_size)
+		var bh := rng.randi_range(min_size, max_size)
+		_building(rng.randi_range(2, w - 2 - bw), rng.randi_range(2, h - 2 - bh), bw, bh, RUIN if rng.randf() < 0.75 else METAL, rng.randf_range(hmin, hmax), true, false)
+	for i in walls:
+		_low_wall(rng.randi_range(2, w - 3), rng.randi_range(2, h - 3), rng.randi_range(2, 5), rng.randf() < 0.5, RUIN, 0.95)
+
+
+func _layout_town() -> void:
+	## City blocks between two-square streets: tall buildings, narrow alleys.
+	var by := 2
+	while by < h - 4:
+		var bx := 2
+		while bx < w - 4:
+			var bw := mini(4, w - 2 - bx)
+			var bh := mini(4, h - 2 - by)
+			match rng.randi_range(0, 3):
+				0:
+					_building(bx, by, bw, bh, RUIN, rng.randf_range(3.0, 4.6), true, rng.randf() < 0.5)
+				1:
+					# Two buildings with a one-square alley between them.
+					_building(bx, by, bw, 1 + bh / 2 - 1, RUIN, rng.randf_range(2.4, 4.0), true, false)
+					_building(bx, by + bh / 2 + 1, bw, bh - bh / 2 - 1, METAL if rng.randf() < 0.3 else RUIN, rng.randf_range(2.4, 4.0), true, false)
+				2:
+					_building(bx, by, 2, bh, RUIN, rng.randf_range(2.6, 4.2), true, false)
+					_building(bx + 3, by, 1, bh, RUIN, rng.randf_range(2.4, 3.6), true, false)
+				_:
+					pass  # a small square: open space
+			bx += 6
+		by += 6
+	for i in 5:
+		_low_wall(rng.randi_range(2, w - 3), rng.randi_range(2, h - 3), rng.randi_range(2, 3), rng.randf() < 0.5, RUIN, 0.95)
+
+
+func _layout_village() -> void:
+	## Cottages with pitched roofs, fences and open fields.
+	for i in 12:
+		var bw := rng.randi_range(2, 3)
+		var bh := rng.randi_range(3, 4)
+		if rng.randf() < 0.5:
+			var tmp := bw
+			bw = bh
+			bh = tmp
+		var bx := rng.randi_range(2, w - 2 - bw)
+		var by := rng.randi_range(2, h - 2 - bh)
+		_building(bx, by, bw, bh, RUIN, 2.2, false, false)
+		# Pitched roof: the middle line of the cottage stands higher.
+		if bw <= bh:
+			for yy in bh:
+				var c := Vector2i(bx + bw / 2, by + yy)
+				if _inner(c.x, c.y) and kinds[idx(c.x, c.y)] == RUIN:
+					heights[idx(c.x, c.y)] += 0.7
+		else:
+			for xx in bw:
+				var c2 := Vector2i(bx + xx, by + bh / 2)
+				if _inner(c2.x, c2.y) and kinds[idx(c2.x, c2.y)] == RUIN:
+					heights[idx(c2.x, c2.y)] += 0.7
+	for i in 14:
+		_low_wall(rng.randi_range(2, w - 3), rng.randi_range(2, h - 3), rng.randi_range(3, 6), rng.randf() < 0.5, RUIN, 0.75)
+
+
+func _layout_industrial() -> void:
+	## Warehouses, storage tanks, shipping containers and pipe runs.
+	for i in 7:
+		var bw := rng.randi_range(3, 5)
+		var bh := rng.randi_range(4, 6)
+		_building(rng.randi_range(2, w - 2 - bw), rng.randi_range(2, h - 2 - bh), bw, bh, METAL, rng.randf_range(3.0, 4.6), false, rng.randf() < 0.3)
+	for i in 3:
+		var c := Vector2i(rng.randi_range(4, w - 5), rng.randi_range(4, h - 5))
+		for yy in range(-1, 2):
+			for xx in range(-1, 2):
+				if absi(xx) + absi(yy) <= 1:
+					_building(c.x + xx, c.y + yy, 1, 1, METAL, 3.6, false, false)
+	for i in 8:
+		var horizontal := rng.randf() < 0.5
+		var x0 := rng.randi_range(2, w - 5)
+		var y0 := rng.randi_range(2, h - 5)
+		_building(x0, y0, 3 if horizontal else 1, 1 if horizontal else 3, METAL, rng.randf_range(1.2, 1.6), false, false)
+	for i in 6:
+		_low_wall(rng.randi_range(2, w - 3), rng.randi_range(2, h - 3), rng.randi_range(5, 9), rng.randf() < 0.5, METAL, 0.85)
 
 
 func _place_hives(dist: PackedInt32Array, count: int) -> void:
