@@ -5,7 +5,7 @@ extends Node
 
 const Story = preload("res://scripts/story.gd")
 
-const VERSION := "2.0"
+const VERSION := "2.1"
 const SAVE_PATH := "user://rock_save.cfg"
 
 # --- Mech ---------------------------------------------------------------------
