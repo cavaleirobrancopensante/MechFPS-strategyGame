@@ -219,7 +219,7 @@ The screen is already busy, so new actions must not just add buttons.
 | Update | Name | Contents | Size |
 |---|---|---|---|
 | **1.4** | New Flesh, part 1 (done) | Bake system (Godot 3D → sprites, cached); people and first-person guns; aim down the sight; cockpit gunsight | Large |
-| **1.5** | New Flesh, part 2 | Aliens, Brigid seen from outside, the Chest and props in the new style | Large |
+| **1.5** | New Flesh, part 2 (done) | Aliens, Brigid seen from outside, the Chest and props in the new style | Large |
 | **1.6** | Never Clean | Threat director, roamers, alien targeting of crew, survivors and Chest; crew from the base with names, health and death; crew orders; Chest armour | Medium |
 | **1.7** | Up and Over | Mech jump jets and pilot jetpack with fuel; rooftops; landing damage; fuel economy | Medium |
 | **1.8** | The Workshop | Hardpoints, 15+ mech parts, weight/power/heat, damage types and resistances, Workshop building and tab | Large |

@@ -29,8 +29,19 @@ func _ready() -> void:
 		lbl.text = "Preparing models…"
 		add_child(lbl)
 		Baker.progress.connect(func(f, what): if is_instance_valid(lbl): lbl.text = "Preparing models… %s %d%%" % [what, int(f * 100.0)])
-		Baker.finished.connect(func(): if is_instance_valid(lbl): lbl.queue_free())
+		Baker.finished.connect(func():
+			if is_instance_valid(lbl):
+				lbl.queue_free()
+			_use_baked_mech())
 		Baker.bake()
+	else:
+		_use_baked_mech()
+
+
+func _use_baked_mech() -> void:
+	## Show the photographed 3D Brigid on the menu once it exists.
+	if Baker.sprites.has("mech"):
+		_mech_tex = Baker.sprites["mech"]["dirs"][1][0]
 
 
 func _process(delta: float) -> void:

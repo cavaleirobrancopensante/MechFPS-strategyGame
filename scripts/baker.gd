@@ -14,7 +14,8 @@ extends Node
 signal finished
 signal progress(fraction: float, label: String)
 
-const BAKE_VERSION := 5
+const BAKE_VERSION := 8
+const Models3D = preload("res://scripts/models3d.gd")
 const DIRS := 8
 const GAME_HFOV := 66.8        ## degrees: matches the battle view (2 * atan(0.66))
 
@@ -100,7 +101,6 @@ func _setup(size: Vector2i, ortho: bool) -> void:
 func _shoot() -> Image:
 	_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
 	await RenderingServer.frame_post_draw
-	await RenderingServer.frame_post_draw
 	var img := _vp.get_texture().get_image()
 	img.convert(Image.FORMAT_RGBA8)
 	return img
@@ -179,6 +179,60 @@ func _mat(key: String, col: Color, rough := 0.8, metal := 0.0, kind := "cloth") 
 			m.emission_enabled = true
 			m.emission = col
 			m.emission_energy_multiplier = 1.5
+		"chitin":
+			# Glossy insect shell with a pitted surface.
+			m.normal_enabled = true
+			m.normal_texture = _normal("chitin", 0.35, 21, 4.0)
+			m.normal_scale = 0.5
+			m.uv1_scale = Vector3(3, 3, 3)
+			m.metallic_specular = 0.8
+			m.rim_enabled = true
+			m.rim = 0.3
+			m.rim_tint = 0.4
+		"flesh":
+			# Wet, veined alien flesh: rim light fakes the glow through skin.
+			m.normal_enabled = true
+			m.normal_texture = _normal("flesh", 0.12, 23, 3.0)
+			m.normal_scale = 0.7
+			m.uv1_scale = Vector3(2, 2, 2)
+			m.rim_enabled = true
+			m.rim = 0.6
+			m.rim_tint = 0.9
+			m.metallic_specular = 0.7
+		"bone":
+			m.normal_enabled = true
+			m.normal_texture = _normal("bone", 0.2, 25, 2.0)
+			m.normal_scale = 0.4
+		"earth":
+			m.normal_enabled = true
+			m.normal_texture = _normal("earth", 0.15, 27, 6.0)
+			m.normal_scale = 1.0
+			m.uv1_scale = Vector3(2, 2, 2)
+		"leaf":
+			m.normal_enabled = true
+			m.normal_texture = _normal("leaf", 0.6, 29, 6.0)
+			m.normal_scale = 1.0
+			m.uv1_scale = Vector3(4, 4, 4)
+		"bark":
+			m.normal_enabled = true
+			m.normal_texture = _normal("bark", 0.4, 31, 6.0)
+			m.normal_scale = 1.0
+			m.uv1_scale = Vector3(1, 4, 1)
+		"paint":
+			# Painted steel, scuffed.
+			m.normal_enabled = true
+			m.normal_texture = _normal("paint", 0.18, 33, 1.5)
+			m.normal_scale = 0.35
+			m.metallic_specular = 0.6
+		"wood":
+			m.normal_enabled = true
+			m.normal_texture = _normal("wood", 0.3, 35, 3.0)
+			m.normal_scale = 0.6
+			m.uv1_scale = Vector3(1, 6, 1)
+		"alpha":
+			m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			m.cull_mode = BaseMaterial3D.CULL_DISABLED
+			m.metallic_specular = 0.9
 	_mats[k] = m
 	return m
 
@@ -397,7 +451,7 @@ func _bake_people() -> void:
 	]
 	for n in jobs.size():
 		var job: Array = jobs[n]
-		progress.emit(float(n) / jobs.size() * 0.7, "People")
+		progress.emit(float(n) / jobs.size() * 0.35, "People")
 		var frames: int = job[4]
 		_setup(Vector2i(S * frames, S), true)
 		_cam.size = L
@@ -494,7 +548,7 @@ func _build_carbine(hazmat: bool) -> Dictionary:
 func _build_arm() -> Dictionary:
 	## Brigid's right arm: armoured forearm housing, hydraulics, ammo feed
 	## and a six-barrel rotary autocannon in a vented shroud. Points to -Z.
-	var armour := _mat("armour", Color(0.2, 0.22, 0.21), 0.8, 0.2, "metal")
+	var armour := _mat("armour", Color(0.15, 0.17, 0.16), 0.75, 0.3, "paint")
 	var dark := _mat("dark", Color(0.12, 0.12, 0.13), 0.45, 0.7, "metal")
 	var steel := _mat("steel", Color(0.5, 0.51, 0.52), 0.3, 0.9, "metal")
 	var hazard := _mat("hazard", Color(0.62, 0.48, 0.1), 0.75, 0.1, "metal")
@@ -504,7 +558,9 @@ func _build_arm() -> Dictionary:
 	_part(a, _box(0.44, 0.08, 1.4), armour, Vector3(0, 0.24, 0.3))
 	_part(a, _box(0.52, 0.1, 0.06), dark, Vector3(0, 0.0, -0.2))                   # panel seams
 	_part(a, _box(0.52, 0.1, 0.06), dark, Vector3(0, 0.0, 0.5))
-	_part(a, _box(0.06, 0.32, 0.3), hazard, Vector3(-0.26, 0.0, -0.3))
+	# Hazard chevrons painted on the inner side
+	for i in 5:
+		_part(a, _box(0.012, 0.06, 0.34), hazard if i % 2 == 0 else dark, Vector3(-0.255, 0.12 - i * 0.06, -0.3), Vector3(0.6, 0, 0))
 	for i in 3:
 		_part(a, _box(0.52, 0.02, 0.012), dark, Vector3(0, 0.15 - i * 0.04, 0.9))
 	# Hydraulic pistons underneath
@@ -585,9 +641,100 @@ func _bake_first_person() -> void:
 			"muzzle": Vector2(w - src["muzzle"].x, src["muzzle"].y)}
 
 
+func _bake_set(key: String, L: float, S: int, frames: int, builder: Callable, roll := 0.0) -> void:
+	## Photographs one model from 8 directions, `frames` animation steps in a
+	## row per shot. A non-zero roll lays the model down as a carcass.
+	_setup(Vector2i(S * frames, S), true)
+	_cam.size = L
+	_cam.position = Vector3(0, L * 0.5 - 0.01, 8.0)
+	_cam.far = 20.0
+	var holders: Array = []
+	for f in frames:
+		var holder := Node3D.new()
+		holder.position = Vector3((f - (frames - 1) * 0.5) * L, 0, 0)
+		_root.add_child(holder)
+		var model: Node3D = builder.call(float(f) / frames)
+		holder.add_child(model)
+		if roll != 0.0:
+			_lay_down(holder, model, roll)
+		holders.append(holder)
+	var dirs: Array = []
+	for d in DIRS:
+		var yaw := TAU * d / DIRS
+		for hd in holders:
+			hd.rotation.y = yaw
+		_light.rotation = Vector3(-0.85, yaw + 0.7, 0)
+		var img: Image = await _shoot()
+		var row: Array = []
+		for f in frames:
+			row.append(ImageTexture.create_from_image(img.get_region(Rect2i(f * S, 0, S, S))))
+		dirs.append(row)
+	sprites[key] = {"L": L, "dirs": dirs}
+	_clear_root()
+
+
+func _lay_down(holder: Node3D, model: Node3D, roll: float) -> void:
+	## Rolls a model over and rests it on the ground, centred.
+	model.rotation = Vector3(0, 0, roll)
+	var lo := Vector3(1e9, 1e9, 1e9)
+	var hi := Vector3(-1e9, -1e9, -1e9)
+	var inv := holder.global_transform.affine_inverse()
+	for mi in model.find_children("*", "MeshInstance3D", true, false):
+		var xf: Transform3D = inv * (mi as MeshInstance3D).global_transform
+		var ab: AABB = (mi as MeshInstance3D).get_aabb()
+		for i in 8:
+			var p := xf * ab.get_endpoint(i)
+			lo = lo.min(p)
+			hi = hi.max(p)
+	model.position = Vector3(-(lo.x + hi.x) * 0.5, -lo.y - 0.02, -(lo.z + hi.z) * 0.5)
+
+
+func _bake_world_models() -> void:
+	## 1.5: aliens, carcasses, Brigid, the Chest and every prop.
+	var md = Models3D.new(self)
+	var jobs := [
+		["crawler", 1.4, 112, 6, func(ph): return md.crawler(ph), 0.0],
+		["spitter", 1.25, 112, 6, func(ph): return md.spitter(ph), 0.0],
+		["brute", 1.95, 144, 6, func(ph): return md.brute(ph), 0.0],
+		["flyer", 1.5, 112, 4, func(ph): return md.flyer(ph), 0.0],
+		["burrower", 2.0, 144, 6, func(ph): return md.burrower(ph), 0.0],
+		["mound", 1.3, 80, 2, func(ph): return md.mound(ph), 0.0],
+		["hive", 2.2, 144, 3, func(ph): return md.hive(ph, 1.0, false), 0.0],
+		["mother", 3.9, 192, 3, func(ph): return md.hive(ph, 1.75, true), 0.0],
+		["crawler_dead", 1.4, 112, 1, func(ph): return md.crawler(0.2, true), PI],
+		["spitter_dead", 1.25, 112, 1, func(ph): return md.spitter(0.0, true), PI * 0.5],
+		["brute_dead", 1.95, 144, 1, func(ph): return md.brute(0.25, true), PI * 0.5],
+		["flyer_dead", 1.5, 112, 1, func(ph): return md.flyer(0.0, true), PI],
+		["burrower_dead", 2.0, 144, 1, func(ph): return md.burrower(0.25, true), PI],
+		["hive_dead", 2.2, 144, 1, func(ph): return md.hive(0.0, 1.0, false, true), 0.0],
+		["mother_dead", 3.9, 192, 1, func(ph): return md.hive(0.0, 1.75, true, true), 0.0],
+		["mech", 2.3, 160, 1, func(ph): return md.mech(ph), 0.0],
+		["chest", 2.2, 128, 4, func(ph): return md.chest(ph, true), 0.0],
+		["chest_nosuit", 2.2, 128, 4, func(ph): return md.chest(ph, false), 0.0],
+		["cache", 0.65, 64, 2, func(ph): return md.crate(ph), 0.0],
+		["item_fuel", 0.65, 64, 1, func(ph): return md.canister(ph), 0.0],
+		["item_data", 0.65, 64, 2, func(ph): return md.datacore(ph), 0.0],
+		["beacon_off", 2.6, 128, 1, func(ph): return md.beacon(false), 0.0],
+		["beacon_on", 2.6, 128, 1, func(ph): return md.beacon(true), 0.0],
+		["pine", 3.2, 160, 1, func(ph): return md.pine(ph), 0.0],
+		["tree", 3.0, 160, 1, func(ph): return md.tree(ph), 0.0],
+		["car", 1.8, 112, 1, func(ph): return md.car(ph), 0.0],
+		["barrel", 0.7, 64, 1, func(ph): return md.barrels(ph), 0.0],
+		["pile_scrap", 0.8, 64, 1, func(ph): return md.scrap_pile(ph), 0.0],
+		["pile_circuits", 0.7, 64, 1, func(ph): return md.circuit_bundle(ph), 0.0],
+		["jar_biomass", 0.6, 64, 2, func(ph): return md.biomass_jar(ph), 0.0],
+	]
+	for n in jobs.size():
+		var j: Array = jobs[n]
+		progress.emit(0.35 + 0.5 * float(n) / jobs.size(), "Creatures and props")
+		await _bake_set(j[0], j[1], j[2], j[3], j[4], j[5])
+	sprites["item_supply"] = sprites["cache"]
+
+
 func _bake_all() -> void:
 	var t0 := Time.get_ticks_msec()
 	await _bake_people()
+	await _bake_world_models()
 	await _bake_first_person()
 	if _vp:
 		_vp.queue_free()
@@ -620,7 +767,21 @@ func _save_cache() -> void:
 		f.store_string(JSON.stringify(meta))
 
 
+func _remove_old_caches() -> void:
+	var d := DirAccess.open("user://")
+	if d == null:
+		return
+	for sub in d.get_directories():
+		if sub.begins_with("bake_v") and sub != dir_path().get_file():
+			var old := DirAccess.open("user://" + sub)
+			if old:
+				for f in old.get_files():
+					old.remove(f)
+			d.remove(sub)
+
+
 func _load_cache() -> bool:
+	_remove_old_caches()
 	var path := dir_path()
 	if not FileAccess.file_exists(path + "/meta.json"):
 		return false

@@ -269,9 +269,15 @@ func _ready() -> void:
 	PITCH_SENS *= Settings.look_sensitivity
 	_apply_theme(Themes.pick(int(op.get("theme_seed", op.get("seed", 7)))))
 	tex = AlienArt.build_all()
-	tex3d = ModelArt.build_all()
-	for k in Baker.sprites:
-		tex3d[k] = Baker.sprites[k]
+	if Baker.sprites.has("crawler"):
+		# 1.5: everything is a photographed 3D model.
+		tex3d = Baker.sprites.duplicate()
+		if not tex3d.has("survivor"):
+			tex3d["survivor"] = tex3d["survivor_a"]
+	else:
+		tex3d = ModelArt.build_all().duplicate()
+		for k in Baker.sprites:
+			tex3d[k] = Baker.sprites[k]
 	pilot_max_hp = GameState.pilot_max_hp()
 	pilot_hp = pilot_max_hp
 	for a in GameState.AMMO:
@@ -1911,7 +1917,9 @@ func _drop_carried() -> void:
 func _spawn_chest() -> void:
 	var spot := map.start + Vector2(1.5, 0)
 	for k in 16:
-		var p := map.start + Vector2.from_angle(TAU * k / 16.0) * 1.6
+		# Behind Brigid first, so it isn't standing in your view at the drop.
+		var off := (k / 2 + 1) * 0.35 * (1.0 if k % 2 == 0 else -1.0) if k > 0 else 0.0
+		var p := map.start + Vector2.from_angle(angle + PI + off) * 1.8
 		if not map.blocked(p, CHEST_R, map.height_at(p)) and absf(map.height_at(p) - map.height_at(map.start)) < 0.4:
 			spot = p
 			break
