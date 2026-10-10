@@ -8,8 +8,8 @@ config_version=5
 
 config/name="Mech FPS - Hive Breakers"
 config/description="Pilot a mech through alien-infested ruins in a pseudo-3D cockpit view, then repair and upgrade it in the hangar."
-config/version="1.4"
-run/main_scene="res://scenes/hangar.tscn"
+config/version="2.0"
+run/main_scene="res://scenes/base.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 
 [autoload]

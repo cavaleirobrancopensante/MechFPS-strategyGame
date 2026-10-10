@@ -4,7 +4,7 @@ extends RefCounted
 ## and tall ruins are all just cells with different heights. The cockpit view
 ## raycasts through this grid to fake 3D; the minimap draws it from above.
 
-enum { EMPTY, RUIN, METAL, ORGANIC, PLATFORM }
+enum { EMPTY, RUIN, METAL, ORGANIC, PLATFORM, RUBBLE }
 
 const STEP := 0.6        ## highest ledge a walker can climb onto
 const BORDER_H := 5.0
@@ -25,6 +25,8 @@ var mech_cells := PackedByteArray()   ## 1 where the mech can stand
 var bunker_interiors: Array[Rect2i] = []
 var rng := RandomNumberGenerator.new()
 var _reserved := PackedByteArray()    ## cells that buildings must not overwrite
+var hard := PackedByteArray()         ## 1 = can't be blasted (bunkers, map edge)
+var wall_hp := PackedByteArray()      ## rocket hits left before a wall collapses
 
 
 func generate(seed_value: int, hive_count: int) -> void:
@@ -227,6 +229,27 @@ func generate(seed_value: int, hive_count: int) -> void:
 	for v in heights:
 		max_height = maxf(max_height, v)
 
+	# Destructible terrain: how many rocket hits each wall can take.
+	hard.resize(w * h)
+	hard.fill(0)
+	wall_hp.resize(w * h)
+	wall_hp.fill(0)
+	for y in h:
+		for x in w:
+			var i := idx(x, y)
+			if x == 0 or y == 0 or x == w - 1 or y == h - 1:
+				hard[i] = 1
+			match kinds[i]:
+				RUIN: wall_hp[i] = 1 if heights[i] - terrain[i] < 1.5 else 2
+				METAL: wall_hp[i] = 3
+				ORGANIC: wall_hp[i] = 1
+	for r in bunker_interiors:
+		# Pre-war blast shelters: rockets won't scratch them.
+		for yy in range(r.position.y - 1, r.end.y + 1):
+			for xx in range(r.position.x - 1, r.end.x + 1):
+				if in_bounds(xx, yy) and is_solid(xx, yy):
+					hard[idx(xx, yy)] = 1
+
 
 func _place_hives(dist: PackedInt32Array, count: int) -> void:
 	hive_cells.clear()
@@ -250,7 +273,7 @@ func _place_hives(dist: PackedInt32Array, count: int) -> void:
 			if ok:
 				hive_cells.append(c)
 		min_spacing -= 2.0
-	if hive_cells.is_empty():
+	if hive_cells.is_empty() and count > 0:
 		hive_cells.append(Vector2i(w - 4, h - 4))
 		_set_cell(w - 4, h - 4, EMPTY, terrain[idx(w - 4, h - 4)])
 
@@ -444,6 +467,32 @@ func cell_h(x: int, y: int) -> float:
 
 func height_at(p: Vector2) -> float:
 	return cell_h(int(floor(p.x)), int(floor(p.y)))
+
+
+func blast(center: Vector2, radius: float) -> Dictionary:
+	## A rocket explosion. Damages breakable walls in range and turns the
+	## ones that give way into rubble. Returns {"destroyed": [...], "hard_hit": bool}.
+	var destroyed: Array[Vector2i] = []
+	var hard_hit := false
+	for yy in range(int(floor(center.y - radius)), int(floor(center.y + radius)) + 1):
+		for xx in range(int(floor(center.x - radius)), int(floor(center.x + radius)) + 1):
+			if not in_bounds(xx, yy) or not is_solid(xx, yy):
+				continue
+			var nearest := Vector2(clampf(center.x, xx, xx + 1), clampf(center.y, yy, yy + 1))
+			if nearest.distance_to(center) > radius:
+				continue
+			var i := idx(xx, yy)
+			if hard[i]:
+				hard_hit = true
+				continue
+			if wall_hp[i] > 1:
+				wall_hp[i] -= 1
+				continue
+			wall_hp[i] = 0
+			kinds[i] = RUBBLE
+			heights[i] = maxf(terrain[i], 0.0) + 0.45
+			destroyed.append(Vector2i(xx, yy))
+	return {"destroyed": destroyed, "hard_hit": hard_hit}
 
 
 func is_solid(x: int, y: int) -> bool:
